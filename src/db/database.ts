@@ -16,6 +16,8 @@ import {
   AppSettings,
   OrderStatus,
   ReturnDisposition,
+  TrashItem,
+  TrashEntityType,
 } from '../types/database';
 import {
   calculateAvailableStock,
@@ -609,19 +611,20 @@ export const INITIAL_AUDIT_LOGS: AuditLog[] = [
 
 export function getDefaultState(): DatabaseState {
   return {
-    products: INITIAL_PRODUCTS,
-    suppliers: INITIAL_SUPPLIERS,
+    products: JSON.parse(JSON.stringify(INITIAL_PRODUCTS)),
+    suppliers: JSON.parse(JSON.stringify(INITIAL_SUPPLIERS)),
     purchaseOrders: [],
-    stockMovements: INITIAL_STOCK_MOVEMENTS,
-    customers: INITIAL_CUSTOMERS,
-    orders: INITIAL_ORDERS,
-    parcels: INITIAL_PARCELS,
-    adExpenses: INITIAL_AD_EXPENSES,
-    operatingExpenses: INITIAL_OPERATING_EXPENSES,
+    stockMovements: JSON.parse(JSON.stringify(INITIAL_STOCK_MOVEMENTS)),
+    customers: JSON.parse(JSON.stringify(INITIAL_CUSTOMERS)),
+    orders: JSON.parse(JSON.stringify(INITIAL_ORDERS)),
+    parcels: JSON.parse(JSON.stringify(INITIAL_PARCELS)),
+    adExpenses: JSON.parse(JSON.stringify(INITIAL_AD_EXPENSES)),
+    operatingExpenses: JSON.parse(JSON.stringify(INITIAL_OPERATING_EXPENSES)),
     courierSettlements: [],
-    bankAccounts: INITIAL_BANK_ACCOUNTS,
-    auditLogs: INITIAL_AUDIT_LOGS,
-    settings: INITIAL_SETTINGS,
+    bankAccounts: JSON.parse(JSON.stringify(INITIAL_BANK_ACCOUNTS)),
+    auditLogs: JSON.parse(JSON.stringify(INITIAL_AUDIT_LOGS)),
+    trash: [],
+    settings: { ...INITIAL_SETTINGS },
   };
 }
 
@@ -666,6 +669,7 @@ class DatabaseService {
           courierSettlements: parsed.courierSettlements || [],
           bankAccounts: parsed.bankAccounts || INITIAL_BANK_ACCOUNTS,
           auditLogs: parsed.auditLogs || INITIAL_AUDIT_LOGS,
+          trash: parsed.trash || [],
           settings: { ...INITIAL_SETTINGS, ...(parsed.settings || {}) },
         };
       }
@@ -699,6 +703,32 @@ class DatabaseService {
     };
     this.state.auditLogs = [log, ...this.state.auditLogs].slice(0, 500);
     this.saveToStorage();
+  }
+
+  private addToTrash(params: {
+    entityType: TrashEntityType;
+    entityId: string;
+    entityName: string;
+    consequencesSummary: string;
+    payload: any;
+    reason?: string;
+    canRestore?: boolean;
+  }): TrashItem {
+    const item: TrashItem = {
+      id: 'trash-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
+      entityType: params.entityType,
+      entityId: params.entityId,
+      entityName: params.entityName,
+      deletedAt: new Date().toISOString(),
+      deletedBy: 'Admin',
+      reason: params.reason || 'Deleted by Admin',
+      consequencesSummary: params.consequencesSummary,
+      payload: JSON.parse(JSON.stringify(params.payload)),
+      canRestore: params.canRestore ?? true,
+    };
+    if (!this.state.trash) this.state.trash = [];
+    this.state.trash.unshift(item);
+    return item;
   }
 
   // --- PRODUCTS & INVENTORY ---
@@ -771,16 +801,81 @@ class DatabaseService {
     }
   }
 
-  public deleteProduct(productId: string): { success: boolean; error?: string } {
+  public archiveProduct(productId: string, isArchived: boolean = true): { success: boolean; product?: Product; error?: string } {
+    const prod = this.state.products.find((p) => p.id === productId);
+    if (!prod) return { success: false, error: 'Product not found' };
+    prod.isArchived = isArchived;
+    prod.updatedAt = new Date().toISOString();
+    this.logAudit(
+      isArchived ? 'ARCHIVE_PRODUCT' : 'UNARCHIVE_PRODUCT',
+      'Product',
+      prod.id,
+      `${isArchived ? 'Archived' : 'Unarchived'} product ${prod.name} (${prod.sku})`
+    );
+    this.saveToStorage();
+    return { success: true, product: prod };
+  }
+
+  public deleteProduct(productId: string, options?: { reason?: string; archiveOnlyIfReferenced?: boolean }): {
+    success: boolean;
+    archivedInstead?: boolean;
+    error?: string;
+  } {
     const prod = this.state.products.find((p) => p.id === productId);
     if (!prod) return { success: false, error: 'Product not found' };
     if (prod.reservedStock > 0) {
-      return { success: false, error: `Cannot delete "${prod.name}": ${prod.reservedStock} units are currently reserved for active orders.` };
+      return {
+        success: false,
+        error: `Cannot delete "${prod.name}": ${prod.reservedStock} units are currently reserved for open orders. Cancel or complete the open orders first.`,
+      };
     }
+
+    const referencedOrders = this.state.orders.filter((o) => o.items.some((it) => it.productId === productId));
+    if (options?.archiveOnlyIfReferenced && referencedOrders.length > 0) {
+      prod.isArchived = true;
+      prod.updatedAt = new Date().toISOString();
+      this.logAudit(
+        'ARCHIVE_PRODUCT',
+        'Product',
+        prod.id,
+        `Soft-archived product ${prod.name} (${prod.sku}) because it is referenced by ${referencedOrders.length} historical order(s).`
+      );
+      this.saveToStorage();
+      return { success: true, archivedInstead: true };
+    }
+
+    const consequence =
+      referencedOrders.length > 0
+        ? `Moved to Trash. Referenced in ${referencedOrders.length} historical order(s) (historical cost snapshots preserved). Stock removed: ${prod.currentStock} units.`
+        : `Moved to Trash. Stock removed: ${prod.currentStock} units (Value: ৳${Math.round(prod.currentStock * prod.purchaseCost)}).`;
+
+    this.addToTrash({
+      entityType: 'Product',
+      entityId: prod.id,
+      entityName: `${prod.name} (${prod.sku})`,
+      consequencesSummary: consequence,
+      payload: prod,
+      reason: options?.reason,
+    });
+
     this.state.products = this.state.products.filter((p) => p.id !== productId);
-    this.logAudit('DELETE_PRODUCT', 'Product', productId, `Deleted product ${prod.name} (${prod.sku})`);
+    this.logAudit('DELETE_PRODUCT', 'Product', productId, `Deleted product ${prod.name} (${prod.sku}) to Trash. ${consequence}`);
     this.saveToStorage();
     return { success: true };
+  }
+
+  public bulkDeleteProducts(productIds: string[]): { success: boolean; deletedCount: number; errors: string[] } {
+    let deletedCount = 0;
+    const errors: string[] = [];
+    for (const id of productIds) {
+      const res = this.deleteProduct(id, { reason: 'Bulk delete products' });
+      if (res.success) {
+        deletedCount++;
+      } else if (res.error) {
+        errors.push(res.error);
+      }
+    }
+    return { success: deletedCount > 0, deletedCount, errors };
   }
 
   public recordStockMovement(mov: Omit<StockMovement, 'id' | 'date'>): StockMovement {
@@ -792,6 +887,34 @@ class DatabaseService {
     this.state.stockMovements = [fullMovement, ...this.state.stockMovements];
     this.saveToStorage();
     return fullMovement;
+  }
+
+  public deleteStockMovement(movementId: string): { success: boolean; error?: string } {
+    const mov = this.state.stockMovements.find((m) => m.id === movementId);
+    if (!mov) return { success: false, error: 'Stock movement record not found' };
+
+    const prod = this.state.products.find((p) => p.id === mov.productId);
+    let consequence = `Removed movement log (${mov.movementType}, Qty: ${mov.quantity}).`;
+
+    if (prod && mov.movementType === 'adjustment') {
+      const delta = mov.newOnHand - mov.previousOnHand;
+      prod.currentStock = Math.max(0, prod.currentStock - delta);
+      prod.updatedAt = new Date().toISOString();
+      consequence = `Reversed stock adjustment of ${delta >= 0 ? '+' : ''}${delta} units on "${prod.name}". Restored On-Hand to ${prod.currentStock}.`;
+    }
+
+    this.addToTrash({
+      entityType: 'StockMovement',
+      entityId: mov.id,
+      entityName: `${mov.productName} (${mov.movementType})`,
+      consequencesSummary: consequence,
+      payload: mov,
+    });
+
+    this.state.stockMovements = this.state.stockMovements.filter((m) => m.id !== movementId);
+    this.logAudit('DELETE_STOCK_MOVEMENT', 'StockMovement', movementId, consequence);
+    this.saveToStorage();
+    return { success: true };
   }
 
   public adjustStock(params: {
@@ -840,6 +963,7 @@ class DatabaseService {
     const idx = this.state.suppliers.findIndex((s) => s.id === supplierData.id);
     if (idx >= 0) {
       this.state.suppliers[idx] = { ...this.state.suppliers[idx], ...supplierData };
+      this.logAudit('UPDATE_SUPPLIER', 'Supplier', this.state.suppliers[idx].id, `Updated supplier ${supplierData.name}`);
       this.saveToStorage();
       return this.state.suppliers[idx];
     } else {
@@ -854,12 +978,32 @@ class DatabaseService {
         createdAt: new Date().toISOString(),
       };
       this.state.suppliers.push(newSup);
+      this.logAudit('CREATE_SUPPLIER', 'Supplier', newSup.id, `Added supplier ${newSup.name}`);
       this.saveToStorage();
       return newSup;
     }
   }
 
+  public deleteSupplier(supplierId: string): { success: boolean; error?: string } {
+    const sup = this.state.suppliers.find((s) => s.id === supplierId);
+    if (!sup) return { success: false, error: 'Supplier not found' };
+
+    this.addToTrash({
+      entityType: 'Supplier',
+      entityId: sup.id,
+      entityName: `${sup.name} (${sup.company || sup.phone})`,
+      consequencesSummary: `Moved supplier to Trash. Outstanding balance at deletion: ৳${sup.currentBalance}.`,
+      payload: sup,
+    });
+
+    this.state.suppliers = this.state.suppliers.filter((s) => s.id !== supplierId);
+    this.logAudit('DELETE_SUPPLIER', 'Supplier', supplierId, `Deleted supplier ${sup.name} to Trash`);
+    this.saveToStorage();
+    return { success: true };
+  }
+
   public createPurchaseOrder(po: {
+    id?: string;
     supplierId: string;
     supplierName: string;
     date: string;
@@ -889,6 +1033,44 @@ class DatabaseService {
     const totalAmount = totalItemsCost + (po.shippingCharges || 0);
     const balance = totalAmount - (po.paidAmount || 0);
 
+    const existingIdx = po.id ? this.state.purchaseOrders.findIndex((x) => x.id === po.id) : -1;
+    if (existingIdx >= 0) {
+      const prevPO = this.state.purchaseOrders[existingIdx];
+      // If PO was already received, reconcile stock differences
+      if (prevPO.status === 'received') {
+        for (const oldItem of prevPO.items) {
+          const prod = this.state.products.find((p) => p.id === oldItem.productId);
+          if (prod) {
+            prod.currentStock = Math.max(0, prod.currentStock - oldItem.quantity);
+          }
+        }
+        for (const newItem of poItems) {
+          const prod = this.state.products.find((p) => p.id === newItem.productId);
+          if (prod) {
+            prod.currentStock += newItem.quantity;
+            prod.purchaseCost = newItem.landedUnitCost;
+          }
+        }
+      }
+      const updatedPO: PurchaseOrder = {
+        ...prevPO,
+        supplierId: po.supplierId,
+        supplierName: po.supplierName,
+        date: po.date || prevPO.date,
+        items: poItems,
+        subtotal: totalItemsCost,
+        shippingCharges: po.shippingCharges || 0,
+        totalAmount,
+        paidAmount: po.paidAmount || 0,
+        balance,
+        notes: po.notes || '',
+      };
+      this.state.purchaseOrders[existingIdx] = updatedPO;
+      this.logAudit('UPDATE_PO', 'PurchaseOrder', updatedPO.id, `Updated ${updatedPO.poNumber} (Total: ৳${totalAmount})`);
+      this.saveToStorage();
+      return updatedPO;
+    }
+
     const newPO: PurchaseOrder = {
       id: 'po-' + Date.now(),
       poNumber: 'PO-' + new Date().getFullYear() + '-' + String(this.state.purchaseOrders.length + 1).padStart(3, '0'),
@@ -910,6 +1092,99 @@ class DatabaseService {
     this.logAudit('CREATE_PO', 'PurchaseOrder', newPO.id, `Created ${newPO.poNumber} for ৳${totalAmount}`);
     this.saveToStorage();
     return newPO;
+  }
+
+  public deletePurchaseOrder(poId: string): { success: boolean; error?: string } {
+    const po = this.state.purchaseOrders.find((p) => p.id === poId);
+    if (!po) return { success: false, error: 'Purchase Order not found' };
+
+    let consequence = `Deleted PO ${po.poNumber} (৳${po.totalAmount}).`;
+    if (po.status === 'received') {
+      for (const item of po.items) {
+        const prod = this.state.products.find((p) => p.id === item.productId);
+        if (prod) {
+          const prevOnHand = prod.currentStock;
+          prod.currentStock = Math.max(0, prod.currentStock - item.quantity);
+          this.recordStockMovement({
+            productId: prod.id,
+            productName: prod.name,
+            movementType: 'adjustment',
+            quantity: item.quantity,
+            previousOnHand: prevOnHand,
+            newOnHand: prod.currentStock,
+            previousReserved: prod.reservedStock,
+            newReserved: prod.reservedStock,
+            reason: `Reversed received stock from deleted PO ${po.poNumber}`,
+            referenceId: po.id,
+            performedBy: 'Admin',
+          });
+        }
+      }
+      consequence = `Deleted received PO ${po.poNumber} (৳${po.totalAmount}) and reversed received inventory quantities.`;
+    }
+
+    this.addToTrash({
+      entityType: 'PurchaseOrder',
+      entityId: po.id,
+      entityName: `${po.poNumber} (${po.supplierName})`,
+      consequencesSummary: consequence,
+      payload: po,
+    });
+
+    this.state.purchaseOrders = this.state.purchaseOrders.filter((p) => p.id !== poId);
+    this.logAudit('DELETE_PO', 'PurchaseOrder', poId, consequence);
+    this.saveToStorage();
+    return { success: true };
+  }
+
+  // --- CUSTOMERS ---
+  public getCustomers(): Customer[] {
+    return [...this.state.customers];
+  }
+
+  public saveCustomer(custData: Partial<Customer> & { name: string; phone: string }): Customer {
+    const idx = this.state.customers.findIndex((c) => c.id === custData.id);
+    if (idx >= 0) {
+      this.state.customers[idx] = { ...this.state.customers[idx], ...custData };
+      this.logAudit('UPDATE_CUSTOMER', 'Customer', this.state.customers[idx].id, `Updated customer ${custData.name}`);
+      this.saveToStorage();
+      return this.state.customers[idx];
+    }
+    const newCust: Customer = {
+      id: 'cust-' + Date.now(),
+      name: custData.name.trim(),
+      phone: custData.phone.trim(),
+      address: custData.address || '',
+      district: custData.district || 'Dhaka',
+      totalOrders: custData.totalOrders || 0,
+      totalDelivered: custData.totalDelivered || 0,
+      totalCancelled: custData.totalCancelled || 0,
+      totalReturned: custData.totalReturned || 0,
+      notes: custData.notes || '',
+      createdAt: new Date().toISOString(),
+    };
+    this.state.customers.unshift(newCust);
+    this.logAudit('CREATE_CUSTOMER', 'Customer', newCust.id, `Created customer ${newCust.name}`);
+    this.saveToStorage();
+    return newCust;
+  }
+
+  public deleteCustomer(customerId: string): { success: boolean; error?: string } {
+    const cust = this.state.customers.find((c) => c.id === customerId);
+    if (!cust) return { success: false, error: 'Customer not found' };
+
+    this.addToTrash({
+      entityType: 'Customer',
+      entityId: cust.id,
+      entityName: `${cust.name} (${cust.phone})`,
+      consequencesSummary: `Moved customer profile to Trash (${cust.totalOrders} historical orders preserved).`,
+      payload: cust,
+    });
+
+    this.state.customers = this.state.customers.filter((c) => c.id !== customerId);
+    this.logAudit('DELETE_CUSTOMER', 'Customer', customerId, `Deleted customer ${cust.name} to Trash`);
+    this.saveToStorage();
+    return { success: true };
   }
 
   public receivePurchaseOrderGoods(poId: string): { success: boolean; error?: string } {
@@ -1083,12 +1358,65 @@ class DatabaseService {
     discount?: number;
     deliveryFeeCharged?: number;
     advancePaid?: number;
+    refundAmount?: number;
     courierName?: string;
     consignmentNumber?: string;
     notes?: string;
+    items?: Array<{ productId: string; quantity: number; unitPrice: number }>;
   }): { success: boolean; order?: Order; error?: string } {
     const order = this.state.orders.find((o) => o.id === orderId);
     if (!order) return { success: false, error: 'Order not found' };
+
+    // If order items are updated, reconcile stock reservations or physical deductions
+    if (updates.items && updates.items.length > 0) {
+      const isReservedState = ['confirmed', 'processing', 'packed'].includes(order.status);
+      const isDispatchedState = ['shipped', 'delivered'].includes(order.status);
+
+      // Reverse old item reservations / physical deductions first
+      for (const oldItem of order.items) {
+        const prod = this.state.products.find((p) => p.id === oldItem.productId);
+        if (prod) {
+          if (isReservedState) {
+            prod.reservedStock = Math.max(0, prod.reservedStock - oldItem.quantity);
+          } else if (isDispatchedState) {
+            prod.currentStock += oldItem.quantity;
+          }
+        }
+      }
+
+      // Apply new items and recalculate itemTotal
+      const newLineItems: OrderItem[] = [];
+      let newItemTotal = 0;
+
+      for (const newIt of updates.items) {
+        const prod = this.state.products.find((p) => p.id === newIt.productId);
+        if (!prod) continue;
+        const existingLine = order.items.find((x) => x.productId === newIt.productId);
+        const unitCostSnapshot = existingLine ? existingLine.unitCostSnapshot : prod.purchaseCost;
+        const subtotal = newIt.quantity * newIt.unitPrice;
+        newItemTotal += subtotal;
+
+        if (isReservedState) {
+          prod.reservedStock += newIt.quantity;
+        } else if (isDispatchedState) {
+          prod.currentStock = Math.max(0, prod.currentStock - newIt.quantity);
+        }
+
+        newLineItems.push({
+          id: existingLine?.id || 'oit-' + Math.random().toString(36).substr(2, 6),
+          productId: prod.id,
+          productName: prod.name,
+          sku: prod.sku,
+          quantity: newIt.quantity,
+          unitPrice: newIt.unitPrice,
+          unitCostSnapshot,
+          subtotal,
+        });
+      }
+
+      order.items = newLineItems;
+      order.itemTotal = newItemTotal;
+    }
 
     if (updates.customerName !== undefined) order.customerName = updates.customerName.trim();
     if (updates.customerPhone !== undefined) order.customerPhone = updates.customerPhone.trim();
@@ -1098,6 +1426,7 @@ class DatabaseService {
     if (updates.discount !== undefined) order.discount = Number(updates.discount) || 0;
     if (updates.deliveryFeeCharged !== undefined) order.deliveryFeeCharged = Number(updates.deliveryFeeCharged) || 0;
     if (updates.advancePaid !== undefined) order.advancePaid = Number(updates.advancePaid) || 0;
+    if (updates.refundAmount !== undefined) order.refundAmount = Number(updates.refundAmount) || 0;
     if (updates.courierName !== undefined) order.courierName = updates.courierName;
     if (updates.consignmentNumber !== undefined) order.consignmentNumber = updates.consignmentNumber.trim();
     if (updates.notes !== undefined) order.notes = updates.notes;
@@ -1117,15 +1446,18 @@ class DatabaseService {
       }
     }
 
-    this.logAudit('UPDATE_ORDER', 'Order', order.id, `Updated details for Order ${order.orderNumber}`);
+    this.logAudit('UPDATE_ORDER', 'Order', order.id, `Updated details for Order ${order.orderNumber} (Item Total: ৳${order.itemTotal}, COD: ৳${order.codAmount})`);
     this.saveToStorage();
     return { success: true, order };
   }
 
-  public deleteOrder(orderId: string): { success: boolean; error?: string } {
+  public deleteOrder(orderId: string, reason?: string): { success: boolean; error?: string } {
     const order = this.state.orders.find((o) => o.id === orderId);
     if (!order) return { success: false, error: 'Order not found' };
 
+    const consequenceParts: string[] = [`Order ${order.orderNumber} (${order.status}) moved to Trash.`];
+
+    // 1. Reconcile Stock based on actual status (never restore twice)
     if (['confirmed', 'processing', 'packed'].includes(order.status)) {
       for (const item of order.items) {
         const prod = this.state.products.find((p) => p.id === item.productId);
@@ -1145,19 +1477,85 @@ class DatabaseService {
             newOnHand: prod.currentStock,
             previousReserved: prevReservedVal,
             newReserved: prod.reservedStock,
-            reason: `Order ${order.orderNumber} deleted. Reservation released.`,
+            reason: `Order ${order.orderNumber} deleted. Reservation of ${item.quantity} unit(s) released.`,
             referenceId: order.id,
             performedBy: 'Admin',
           });
         }
       }
+      consequenceParts.push('Reserved stock released back to Available.');
+    } else if (['shipped', 'delivered'].includes(order.status)) {
+      for (const item of order.items) {
+        const prod = this.state.products.find((p) => p.id === item.productId);
+        if (prod) {
+          const prevOnHandVal = prod.currentStock;
+          prod.currentStock += item.quantity;
+          this.recordStockMovement({
+            productId: prod.id,
+            productName: prod.name,
+            movementType: 'return_restock',
+            quantity: item.quantity,
+            previousOnHand: prevOnHandVal,
+            newOnHand: prod.currentStock,
+            previousReserved: prod.reservedStock,
+            newReserved: prod.reservedStock,
+            reason: `Order ${order.orderNumber} (${order.status}) deleted. Physical stock of ${item.quantity} unit(s) restored once.`,
+            referenceId: order.id,
+            performedBy: 'Admin',
+          });
+        }
+      }
+      consequenceParts.push('Dispatched physical stock restored to On-Hand.');
     }
+
+    // 2. Reconcile linked parcels & any settled bank balances
+    const linkedParcels = this.state.parcels.filter((p) => p.orderId === orderId);
+    for (const pcl of linkedParcels) {
+      if (pcl.isSettled && pcl.settledAmount > 0) {
+        const settlement = this.state.courierSettlements.find((s) => s.parcelIds.includes(pcl.id));
+        const bank = settlement
+          ? this.state.bankAccounts.find((b) => b.id === settlement.bankAccountId)
+          : this.state.bankAccounts[0];
+        if (bank) {
+          bank.balance = Math.max(0, bank.balance - pcl.settledAmount);
+          consequenceParts.push(`Reversed settled COD ৳${pcl.settledAmount} from ${bank.accountName}.`);
+        }
+      }
+    }
+
+    // 3. Reconcile customer stats
+    const cust = this.state.customers.find((c) => c.phone.replace(/[\s-]/g, '') === order.customerPhone.replace(/[\s-]/g, ''));
+    if (cust) {
+      cust.totalOrders = Math.max(0, cust.totalOrders - 1);
+      if (order.status === 'delivered') cust.totalDelivered = Math.max(0, cust.totalDelivered - 1);
+      if (order.status === 'cancelled') cust.totalCancelled = Math.max(0, cust.totalCancelled - 1);
+      if (order.status === 'returned') cust.totalReturned = Math.max(0, cust.totalReturned - 1);
+    }
+
+    const consequencesSummary = consequenceParts.join(' ');
+    this.addToTrash({
+      entityType: 'Order',
+      entityId: order.id,
+      entityName: `${order.orderNumber} — ${order.customerName} (৳${order.itemTotal})`,
+      consequencesSummary,
+      payload: { order, linkedParcels },
+      reason,
+    });
 
     this.state.parcels = this.state.parcels.filter((p) => p.orderId !== orderId);
     this.state.orders = this.state.orders.filter((o) => o.id !== orderId);
-    this.logAudit('DELETE_ORDER', 'Order', orderId, `Deleted order ${order.orderNumber}`);
+    this.logAudit('DELETE_ORDER', 'Order', orderId, consequencesSummary);
     this.saveToStorage();
     return { success: true };
+  }
+
+  public bulkDeleteOrders(orderIds: string[]): { success: boolean; deletedCount: number } {
+    let deletedCount = 0;
+    for (const id of orderIds) {
+      const res = this.deleteOrder(id, 'Bulk order deletion');
+      if (res.success) deletedCount++;
+    }
+    return { success: deletedCount > 0, deletedCount };
   }
 
   public updateOrderStatus(params: {
@@ -1389,10 +1787,126 @@ class DatabaseService {
   public updateParcel(parcelId: string, updates: Partial<Parcel>): Parcel | undefined {
     const idx = this.state.parcels.findIndex((p) => p.id === parcelId);
     if (idx < 0) return undefined;
-    const updated = { ...this.state.parcels[idx], ...updates };
+    const prev = this.state.parcels[idx];
+    const updated: Parcel = { ...prev, ...updates };
+
+    // If settled parcel charges changed, reconcile bank account balance
+    if (updated.isSettled) {
+      const newNet = Math.max(0, updated.codAmount - updated.deliveryCharge - (updated.returnCharge || 0));
+      const diff = newNet - prev.settledAmount;
+      updated.settledAmount = newNet;
+      if (diff !== 0) {
+        const settlement = this.state.courierSettlements.find((s) => s.parcelIds.includes(parcelId));
+        const bank = settlement
+          ? this.state.bankAccounts.find((b) => b.id === settlement.bankAccountId)
+          : this.state.bankAccounts[0];
+        if (bank) {
+          bank.balance += diff;
+        }
+      }
+    }
+
+    // Sync status with linked order if parcel status changed
+    const linkedOrder = this.state.orders.find((o) => o.id === updated.orderId);
+    if (linkedOrder) {
+      if (updated.trackingNumber) linkedOrder.consignmentNumber = updated.trackingNumber;
+      linkedOrder.courierName = updated.courierName;
+      if (updated.status === 'delivered' && linkedOrder.status === 'shipped') {
+        linkedOrder.status = 'delivered';
+        linkedOrder.deliveryDate = new Date().toISOString();
+      }
+    }
+
     this.state.parcels[idx] = updated;
+    this.logAudit('UPDATE_PARCEL', 'Parcel', parcelId, `Updated parcel ${updated.trackingNumber} (${updated.status})`);
     this.saveToStorage();
     return updated;
+  }
+
+  public deleteParcel(parcelId: string, reason?: string): { success: boolean; error?: string } {
+    const pcl = this.state.parcels.find((p) => p.id === parcelId);
+    if (!pcl) return { success: false, error: 'Parcel not found' };
+
+    const consequenceParts: string[] = [`Parcel ${pcl.trackingNumber} (${pcl.courierName}) moved to Trash.`];
+
+    // 1. Reconcile bank settlement if parcel was settled
+    if (pcl.isSettled && pcl.settledAmount > 0) {
+      const settlement = this.state.courierSettlements.find((s) => s.parcelIds.includes(pcl.id));
+      const bank = settlement
+        ? this.state.bankAccounts.find((b) => b.id === settlement.bankAccountId)
+        : this.state.bankAccounts[0];
+      if (bank) {
+        bank.balance = Math.max(0, bank.balance - pcl.settledAmount);
+        consequenceParts.push(`Reversed settled COD ৳${pcl.settledAmount} from ${bank.accountName}.`);
+      }
+      if (settlement) {
+        settlement.parcelIds = settlement.parcelIds.filter((id) => id !== pcl.id);
+        settlement.netAmountSettled = Math.max(0, settlement.netAmountSettled - pcl.settledAmount);
+      }
+    }
+
+    // 2. Reconcile linked order shipment status & stock
+    const linkedOrder = this.state.orders.find((o) => o.id === pcl.orderId);
+    let previousOrderStatus: OrderStatus | undefined;
+    if (linkedOrder && ['shipped', 'delivered'].includes(linkedOrder.status)) {
+      previousOrderStatus = linkedOrder.status;
+      linkedOrder.status = 'packed';
+      linkedOrder.updatedAt = new Date().toISOString();
+      linkedOrder.statusTimeline.unshift({
+        status: 'packed',
+        timestamp: new Date().toISOString(),
+        note: `Parcel ${pcl.trackingNumber} deleted. Order reverted to Packed and stock moved back to Reserved.`,
+        changedBy: 'Admin',
+      });
+
+      for (const item of linkedOrder.items) {
+        const prod = this.state.products.find((p) => p.id === item.productId);
+        if (prod) {
+          const prevOnHand = prod.currentStock;
+          const prevReserved = prod.reservedStock;
+          prod.currentStock += item.quantity;
+          prod.reservedStock += item.quantity;
+          this.recordStockMovement({
+            productId: prod.id,
+            productName: prod.name,
+            movementType: 'adjustment',
+            quantity: item.quantity,
+            previousOnHand: prevOnHand,
+            newOnHand: prod.currentStock,
+            previousReserved: prevReserved,
+            newReserved: prod.reservedStock,
+            reason: `Parcel ${pcl.trackingNumber} deleted. Reverted dispatch to reservation for Order ${linkedOrder.orderNumber}.`,
+            referenceId: linkedOrder.id,
+            performedBy: 'Admin',
+          });
+        }
+      }
+      consequenceParts.push(`Linked Order ${linkedOrder.orderNumber} reverted from ${previousOrderStatus} to Packed (stock re-reserved).`);
+    }
+
+    const consequencesSummary = consequenceParts.join(' ');
+    this.addToTrash({
+      entityType: 'Parcel',
+      entityId: pcl.id,
+      entityName: `${pcl.trackingNumber} (${pcl.orderNumber})`,
+      consequencesSummary,
+      payload: { parcel: pcl, previousOrderStatus },
+      reason,
+    });
+
+    this.state.parcels = this.state.parcels.filter((p) => p.id !== parcelId);
+    this.logAudit('DELETE_PARCEL', 'Parcel', parcelId, consequencesSummary);
+    this.saveToStorage();
+    return { success: true };
+  }
+
+  public bulkDeleteParcels(parcelIds: string[]): { success: boolean; deletedCount: number } {
+    let deletedCount = 0;
+    for (const id of parcelIds) {
+      const res = this.deleteParcel(id, 'Bulk parcel deletion');
+      if (res.success) deletedCount++;
+    }
+    return { success: deletedCount > 0, deletedCount };
   }
 
   public settleParcels(parcelIds: string[], bankAccountId: string, notes?: string): { success: boolean; settledAmount: number } {
@@ -1439,6 +1953,40 @@ class DatabaseService {
     this.logAudit('SETTLE_PARCELS', 'CourierSettlement', settlement.id, `Settled ৳${netSettled} into ${bank ? bank.accountName : 'Bank'}`);
     this.saveToStorage();
     return { success: true, settledAmount: netSettled };
+  }
+
+  public deleteCourierSettlement(settlementId: string): { success: boolean; error?: string } {
+    const settlement = this.state.courierSettlements.find((s) => s.id === settlementId);
+    if (!settlement) return { success: false, error: 'Settlement not found' };
+
+    const bank = this.state.bankAccounts.find((b) => b.id === settlement.bankAccountId);
+    if (bank) {
+      bank.balance = Math.max(0, bank.balance - settlement.netAmountSettled);
+    }
+
+    for (const pid of settlement.parcelIds) {
+      const pcl = this.state.parcels.find((p) => p.id === pid);
+      if (pcl) {
+        pcl.isSettled = false;
+        pcl.settledAmount = 0;
+        pcl.settlementDate = undefined;
+        if (pcl.status === 'settled') pcl.status = 'delivered';
+      }
+    }
+
+    const consequence = `Reversed Courier Settlement ${settlement.settlementNumber} (৳${settlement.netAmountSettled}) from ${bank?.accountName || 'Bank'} and marked ${settlement.parcelIds.length} parcel(s) unsettled.`;
+    this.addToTrash({
+      entityType: 'CourierSettlement',
+      entityId: settlement.id,
+      entityName: `${settlement.settlementNumber} (৳${settlement.netAmountSettled})`,
+      consequencesSummary: consequence,
+      payload: settlement,
+    });
+
+    this.state.courierSettlements = this.state.courierSettlements.filter((s) => s.id !== settlementId);
+    this.logAudit('DELETE_SETTLEMENT', 'CourierSettlement', settlementId, consequence);
+    this.saveToStorage();
+    return { success: true };
   }
 
   // --- ADVERTISING & OTHER EXPENSES ---
@@ -1519,14 +2067,32 @@ class DatabaseService {
     return newAd;
   }
 
-  public deleteAdExpense(adId: string): { success: boolean } {
+  public deleteAdExpense(adId: string, reason?: string): { success: boolean } {
     const ad = this.state.adExpenses.find((a) => a.id === adId);
-    this.state.adExpenses = this.state.adExpenses.filter((a) => a.id !== adId);
     if (ad) {
-      this.logAudit('DELETE_AD_EXPENSE', 'AdExpense', adId, `Deleted ad campaign "${ad.campaignName}" (৳${ad.totalBdt})`);
+      const consequence = `Deleted campaign "${ad.campaignName}" ($${ad.usdAmount} / ৳${ad.totalBdt}) and removed all ${ad.allocations.length} daily allocation entries from P&L reports.`;
+      this.addToTrash({
+        entityType: 'AdExpense',
+        entityId: ad.id,
+        entityName: `${ad.campaignName} (${ad.platform} • ৳${ad.totalBdt})`,
+        consequencesSummary: consequence,
+        payload: ad,
+        reason,
+      });
+      this.logAudit('DELETE_AD_EXPENSE', 'AdExpense', adId, consequence);
     }
+    this.state.adExpenses = this.state.adExpenses.filter((a) => a.id !== adId);
     this.saveToStorage();
     return { success: true };
+  }
+
+  public bulkDeleteAdExpenses(adIds: string[]): { success: boolean; deletedCount: number } {
+    let deletedCount = 0;
+    for (const id of adIds) {
+      this.deleteAdExpense(id, 'Bulk ad expense deletion');
+      deletedCount++;
+    }
+    return { success: true, deletedCount };
   }
 
   public getOperatingExpenses(): OperatingExpense[] {
@@ -1582,14 +2148,242 @@ class DatabaseService {
     return newExp;
   }
 
-  public deleteOperatingExpense(expId: string): { success: boolean } {
+  public deleteOperatingExpense(expId: string, reason?: string): { success: boolean } {
     const exp = this.state.operatingExpenses.find((e) => e.id === expId);
-    this.state.operatingExpenses = this.state.operatingExpenses.filter((e) => e.id !== expId);
     if (exp) {
-      this.logAudit('DELETE_OPERATING_EXPENSE', 'OperatingExpense', expId, `Deleted operating expense ৳${exp.amount} (${exp.category})`);
+      const consequence = `Deleted ${exp.category} expense of ৳${exp.amount} (${exp.date}) and recalculated P&L operating overheads.`;
+      this.addToTrash({
+        entityType: 'OperatingExpense',
+        entityId: exp.id,
+        entityName: `${exp.category} — ৳${exp.amount} (${exp.date})`,
+        consequencesSummary: consequence,
+        payload: exp,
+        reason,
+      });
+      this.logAudit('DELETE_OPERATING_EXPENSE', 'OperatingExpense', expId, consequence);
+    }
+    this.state.operatingExpenses = this.state.operatingExpenses.filter((e) => e.id !== expId);
+    this.saveToStorage();
+    return { success: true };
+  }
+
+  public bulkDeleteOperatingExpenses(expIds: string[]): { success: boolean; deletedCount: number } {
+    let deletedCount = 0;
+    for (const id of expIds) {
+      this.deleteOperatingExpense(id, 'Bulk operating expense deletion');
+      deletedCount++;
+    }
+    return { success: true, deletedCount };
+  }
+
+  // --- TRASH / RECENTLY DELETED & RESTORE ---
+  public getTrash(): TrashItem[] {
+    return [...(this.state.trash || [])];
+  }
+
+  public restoreTrashItem(trashId: string): { success: boolean; error?: string } {
+    if (!this.state.trash) this.state.trash = [];
+    const idx = this.state.trash.findIndex((t) => t.id === trashId);
+    if (idx < 0) return { success: false, error: 'Trash record not found' };
+
+    const item = this.state.trash[idx];
+    const payload = item.payload;
+
+    switch (item.entityType) {
+      case 'Product': {
+        const prod = payload as Product;
+        if (!this.state.products.some((p) => p.id === prod.id)) {
+          this.state.products.push(prod);
+        }
+        break;
+      }
+      case 'Order': {
+        const { order, linkedParcels } = payload as { order: Order; linkedParcels: Parcel[] };
+        if (!this.state.orders.some((o) => o.id === order.id)) {
+          // Re-apply stock reservations or physical deductions
+          if (['confirmed', 'processing', 'packed'].includes(order.status)) {
+            for (const it of order.items) {
+              const prod = this.state.products.find((p) => p.id === it.productId);
+              if (prod) prod.reservedStock += it.quantity;
+            }
+          } else if (['shipped', 'delivered'].includes(order.status)) {
+            for (const it of order.items) {
+              const prod = this.state.products.find((p) => p.id === it.productId);
+              if (prod) prod.currentStock = Math.max(0, prod.currentStock - it.quantity);
+            }
+          }
+          this.state.orders.unshift(order);
+        }
+        if (linkedParcels && linkedParcels.length > 0) {
+          for (const pcl of linkedParcels) {
+            if (!this.state.parcels.some((p) => p.id === pcl.id)) {
+              this.state.parcels.unshift(pcl);
+              if (pcl.isSettled && pcl.settledAmount > 0 && this.state.bankAccounts[0]) {
+                this.state.bankAccounts[0].balance += pcl.settledAmount;
+              }
+            }
+          }
+        }
+        break;
+      }
+      case 'Parcel': {
+        const { parcel, previousOrderStatus } = payload as { parcel: Parcel; previousOrderStatus?: OrderStatus };
+        if (!this.state.parcels.some((p) => p.id === parcel.id)) {
+          this.state.parcels.unshift(parcel);
+          if (parcel.isSettled && parcel.settledAmount > 0 && this.state.bankAccounts[0]) {
+            this.state.bankAccounts[0].balance += parcel.settledAmount;
+          }
+          const linkedOrder = this.state.orders.find((o) => o.id === parcel.orderId);
+          if (linkedOrder && previousOrderStatus && linkedOrder.status === 'packed') {
+            linkedOrder.status = previousOrderStatus;
+            for (const it of linkedOrder.items) {
+              const prod = this.state.products.find((p) => p.id === it.productId);
+              if (prod) {
+                prod.currentStock = Math.max(0, prod.currentStock - it.quantity);
+                prod.reservedStock = Math.max(0, prod.reservedStock - it.quantity);
+              }
+            }
+          }
+        }
+        break;
+      }
+      case 'PurchaseOrder': {
+        const po = payload as PurchaseOrder;
+        if (!this.state.purchaseOrders.some((p) => p.id === po.id)) {
+          this.state.purchaseOrders.unshift(po);
+          if (po.status === 'received') {
+            for (const it of po.items) {
+              const prod = this.state.products.find((p) => p.id === it.productId);
+              if (prod) prod.currentStock += it.quantity;
+            }
+          }
+        }
+        break;
+      }
+      case 'Supplier': {
+        const sup = payload as Supplier;
+        if (!this.state.suppliers.some((s) => s.id === sup.id)) {
+          this.state.suppliers.push(sup);
+        }
+        break;
+      }
+      case 'AdExpense': {
+        const ad = payload as AdExpense;
+        if (!this.state.adExpenses.some((a) => a.id === ad.id)) {
+          this.state.adExpenses.unshift(ad);
+        }
+        break;
+      }
+      case 'OperatingExpense': {
+        const exp = payload as OperatingExpense;
+        if (!this.state.operatingExpenses.some((e) => e.id === exp.id)) {
+          this.state.operatingExpenses.unshift(exp);
+        }
+        break;
+      }
+      case 'CourierSettlement': {
+        const settlement = payload as CourierSettlement;
+        if (!this.state.courierSettlements.some((s) => s.id === settlement.id)) {
+          this.state.courierSettlements.unshift(settlement);
+          const bank = this.state.bankAccounts.find((b) => b.id === settlement.bankAccountId);
+          if (bank) bank.balance += settlement.netAmountSettled;
+          for (const pid of settlement.parcelIds) {
+            const pcl = this.state.parcels.find((p) => p.id === pid);
+            if (pcl) {
+              pcl.isSettled = true;
+              pcl.status = 'settled';
+              pcl.settledAmount = Math.max(0, pcl.codAmount - pcl.deliveryCharge - pcl.returnCharge);
+            }
+          }
+        }
+        break;
+      }
+      case 'Customer': {
+        const cust = payload as Customer;
+        if (!this.state.customers.some((c) => c.id === cust.id)) {
+          this.state.customers.unshift(cust);
+        }
+        break;
+      }
+      case 'StockMovement': {
+        const mov = payload as StockMovement;
+        if (!this.state.stockMovements.some((m) => m.id === mov.id)) {
+          this.state.stockMovements.unshift(mov);
+          const prod = this.state.products.find((p) => p.id === mov.productId);
+          if (prod && mov.movementType === 'adjustment') {
+            const delta = mov.newOnHand - mov.previousOnHand;
+            prod.currentStock = Math.max(0, prod.currentStock + delta);
+          }
+        }
+        break;
+      }
+    }
+
+    this.state.trash.splice(idx, 1);
+    this.logAudit('RESTORE_FROM_TRASH', item.entityType, item.entityId, `Restored ${item.entityType} "${item.entityName}" from Trash and reconciled balances.`);
+    this.saveToStorage();
+    return { success: true };
+  }
+
+  public permanentlyDeleteTrashItem(trashId: string): { success: boolean } {
+    if (!this.state.trash) this.state.trash = [];
+    const item = this.state.trash.find((t) => t.id === trashId);
+    this.state.trash = this.state.trash.filter((t) => t.id !== trashId);
+    if (item) {
+      this.logAudit('PERMANENT_DELETE', item.entityType, item.entityId, `Permanently purged ${item.entityType} "${item.entityName}" from Trash.`);
     }
     this.saveToStorage();
     return { success: true };
+  }
+
+  public emptyTrash(): { success: boolean; count: number } {
+    const count = (this.state.trash || []).length;
+    this.state.trash = [];
+    this.logAudit('EMPTY_TRASH', 'System', 'TRASH', `Permanently purged all ${count} record(s) from Trash.`);
+    this.saveToStorage();
+    return { success: true, count };
+  }
+
+  // --- CLEAR TEST / DEMO DATA ONLY ---
+  public clearTestData(): { success: boolean; removedSummary: string } {
+    const demoProductIds = new Set(['prod-1', 'prod-2', 'prod-3', 'prod-4', 'prod-5']);
+    const demoSupplierIds = new Set(['sup-1', 'sup-2']);
+    const demoOrderIds = new Set(['ord-101', 'ord-102', 'ord-103', 'ord-104']);
+    const demoParcelIds = new Set(['pcl-1', 'pcl-2', 'pcl-3']);
+    const demoAdIds = new Set(['ad-1', 'ad-2']);
+    const demoExpIds = new Set(['exp-1', 'exp-2', 'exp-3']);
+    const demoCustIds = new Set(['cust-1', 'cust-2', 'cust-3', 'cust-4']);
+
+    const isTestOrder = (o: Order) =>
+      demoOrderIds.has(o.id) ||
+      o.customerName.toLowerCase().includes('test') ||
+      o.items.some((i) => i.sku.startsWith('TEST-') || demoProductIds.has(i.productId));
+
+    const testOrderIds = new Set(this.state.orders.filter(isTestOrder).map((o) => o.id));
+
+    const prevCounts = {
+      products: this.state.products.length,
+      orders: this.state.orders.length,
+      parcels: this.state.parcels.length,
+      ads: this.state.adExpenses.length,
+      expenses: this.state.operatingExpenses.length,
+    };
+
+    this.state.orders = this.state.orders.filter((o) => !testOrderIds.has(o.id));
+    this.state.parcels = this.state.parcels.filter((p) => !demoParcelIds.has(p.id) && !testOrderIds.has(p.orderId));
+    this.state.products = this.state.products.filter((p) => !demoProductIds.has(p.id) && !p.sku.startsWith('TEST-'));
+    this.state.suppliers = this.state.suppliers.filter((s) => !demoSupplierIds.has(s.id));
+    this.state.adExpenses = this.state.adExpenses.filter((a) => !demoAdIds.has(a.id) && !a.campaignName.toLowerCase().includes('acceptance test'));
+    this.state.operatingExpenses = this.state.operatingExpenses.filter((e) => !demoExpIds.has(e.id));
+    this.state.customers = this.state.customers.filter((c) => !demoCustIds.has(c.id) && !c.name.toLowerCase().includes('test'));
+    this.state.stockMovements = this.state.stockMovements.filter(
+      (m) => !demoProductIds.has(m.productId) && !testOrderIds.has(m.referenceId) && !m.id.startsWith('mov-1') && !m.id.startsWith('mov-2') && !m.id.startsWith('mov-3')
+    );
+
+    const removedSummary = `Cleared test/demo records: ${prevCounts.products - this.state.products.length} products, ${prevCounts.orders - this.state.orders.length} orders, ${prevCounts.parcels - this.state.parcels.length} parcels, ${prevCounts.ads - this.state.adExpenses.length} ad campaigns, ${prevCounts.expenses - this.state.operatingExpenses.length} operating expenses. All real business records preserved.`;
+    this.logAudit('CLEAR_TEST_DATA', 'System', 'TEST_DATA', removedSummary);
+    this.saveToStorage();
+    return { success: true, removedSummary };
   }
 
   // --- SETTINGS, BACKUP & RESTORE ---
@@ -1632,6 +2426,7 @@ class DatabaseService {
         courierSettlements: data.courierSettlements || [],
         bankAccounts: data.bankAccounts || INITIAL_BANK_ACCOUNTS,
         auditLogs: data.auditLogs || [],
+        trash: data.trash || [],
         settings: { ...INITIAL_SETTINGS, ...(data.settings || {}) },
       };
       this.saveToStorage();

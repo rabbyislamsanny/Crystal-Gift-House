@@ -3,6 +3,31 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      (function () {
+        try {
+          var currentFetch = window.fetch ? window.fetch.bind(window) : undefined;
+          var desc = Object.getOwnPropertyDescriptor(window, 'fetch') || Object.getOwnPropertyDescriptor(Window.prototype, 'fetch');
+          if (desc && (!desc.writable && !desc.set) && desc.configurable !== false) {
+            Object.defineProperty(window, 'fetch', {
+              configurable: true,
+              enumerable: true,
+              get: function () { return currentFetch; },
+              set: function (fn) { currentFetch = fn; }
+            });
+          }
+        } catch (e) {}
+
+        window.addEventListener('error', function (event) {
+          var src = (event && event.filename) || '';
+          var msg = (event && event.message) || '';
+          if (src.indexOf('chrome-extension://') === 0 || msg.indexOf('Cannot set property fetch of #<Window>') !== -1) {
+            event.stopImmediatePropagation();
+            event.preventDefault();
+          }
+        }, true);
+      })();
+    </script>
     <title>Crystal Gift House Business OS</title>
     <meta name="description" content="Production-ready, database-backed business management and inventory OS for Crystal Gift House Bangladesh. Tracks orders, stock valuation, parcels, ad spend, and accounting in BDT." />
     <meta property="og:title" content="Crystal Gift House Business OS" />

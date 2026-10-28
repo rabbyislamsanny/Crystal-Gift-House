@@ -306,6 +306,31 @@ export interface AppSettings {
   timezone: string;
 }
 
+export type TrashEntityType =
+  | 'Product'
+  | 'Order'
+  | 'Parcel'
+  | 'PurchaseOrder'
+  | 'Supplier'
+  | 'AdExpense'
+  | 'OperatingExpense'
+  | 'CourierSettlement'
+  | 'Customer'
+  | 'StockMovement';
+
+export interface TrashItem {
+  id: string;
+  entityType: TrashEntityType;
+  entityId: string;
+  entityName: string;
+  deletedAt: string;
+  deletedBy: string;
+  reason?: string;
+  consequencesSummary: string;
+  payload: any;
+  canRestore: boolean;
+}
+
 export interface DatabaseState {
   products: Product[];
   suppliers: Supplier[];
@@ -319,5 +344,7 @@ export interface DatabaseState {
   courierSettlements: CourierSettlement[];
   bankAccounts: BankCashAccount[];
   auditLogs: AuditLog[];
+  trash: TrashItem[];
   settings: AppSettings;
 }
+
