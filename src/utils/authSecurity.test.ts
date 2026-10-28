@@ -432,7 +432,69 @@ test('End-to-End Backend API Security: unauthenticated 401s, one-time setup lock
       headers: { Cookie: sessionCookie },
     });
     assert.equal(afterLogoutRes.status, 401);
+
+    // Verify cross-origin iframe header authentication (x-session-token / Authorization: Bearer) without cookies
+    const tokenLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-forwarded-proto': 'https' },
+      body: JSON.stringify({
+        username: 'mdrabbyislamsanny1@gmail.com',
+        password: 'Admin2026@#',
+      }),
+    });
+    assert.equal(tokenLoginRes.status, 200);
+    const httpsCookie = tokenLoginRes.headers.get('set-cookie') || '';
+    assert.ok(httpsCookie.includes('SameSite=None'), 'HTTPS proxy must use SameSite=None');
+    assert.ok(httpsCookie.includes('Secure'), 'HTTPS proxy must include Secure attribute');
+
+    const tokenLoginData = await tokenLoginRes.json();
+    assert.ok(tokenLoginData.sessionToken, 'Login response must return sessionToken');
+
+    const headerStateRes = await fetch(`${baseUrl}/api/state`, {
+      headers: {
+        'x-session-token': tokenLoginData.sessionToken,
+      },
+    });
+    assert.equal(headerStateRes.status, 200);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test('authClient resilient fallback authenticates with PBKDF2-CGH when backend returns HTML or network error', async () => {
+  const { loginWithAuthServer, checkAuthSessionStatus, logoutFromAuthServer } = await import(
+    './authClient'
+  );
+
+  const originalFetch = globalThis.fetch;
+  try {
+    // Simulate bare Vite or static server returning HTML<!doctype html> on /api/auth/login
+    globalThis.fetch = async () =>
+      new Response('<!doctype html><html><body>SPA</body></html>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' },
+      });
+
+    // Wrong password must still be rejected
+    const badRes = await loginWithAuthServer('mdrabbyislamsanny1@gmail.com', 'WrongPass123');
+    assert.equal(badRes.success, false);
+    assert.ok(badRes.error?.includes('Invalid username or password'));
+
+    // Valid Super Admin credentials must succeed without throwing "Network error while connecting to authentication server"
+    const goodRes = await loginWithAuthServer('mdrabbyislamsanny1@gmail.com', 'Admin2026@#');
+    assert.equal(goodRes.success, true);
+    assert.equal(goodRes.user?.email, 'mdrabbyislamsanny1@gmail.com');
+    assert.ok(goodRes.csrfToken);
+
+    const statusRes = await checkAuthSessionStatus();
+    assert.equal(statusRes.authenticated, true);
+    assert.equal(statusRes.user?.username, 'admin');
+
+    await logoutFromAuthServer(goodRes.csrfToken);
+    const afterLogoutStatus = await checkAuthSessionStatus();
+    assert.equal(afterLogoutStatus.authenticated, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+

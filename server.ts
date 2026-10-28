@@ -99,36 +99,63 @@ export function createApp(options?: CreateAppOptions) {
     lockoutMs: 15 * 60 * 1000,
   });
 
-  function setSessionCookie(res: Response, token: string, maxAgeSeconds: number = 43200): void {
-    const isSecure = process.env.NODE_ENV === 'production';
+  function setSessionCookie(
+    req: Request,
+    res: Response,
+    token: string,
+    maxAgeSeconds: number = 43200
+  ): void {
+    const forwardedProto = (req.headers['x-forwarded-proto'] as string) || '';
+    const isHttps =
+      req.secure ||
+      forwardedProto.toLowerCase().includes('https') ||
+      process.env.NODE_ENV === 'production';
+
     const cookieParts = [
       `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
       'HttpOnly',
       'Path=/',
-      'SameSite=Lax',
+      isHttps ? 'SameSite=None' : 'SameSite=Lax',
       `Max-Age=${maxAgeSeconds}`,
     ];
-    if (isSecure) {
+    if (isHttps) {
       cookieParts.push('Secure');
     }
     res.setHeader('Set-Cookie', cookieParts.join('; '));
   }
 
-  function clearSessionCookie(res: Response): void {
-    res.setHeader(
-      'Set-Cookie',
-      `${SESSION_COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`
-    );
+  function clearSessionCookie(req: Request, res: Response): void {
+    const forwardedProto = (req.headers['x-forwarded-proto'] as string) || '';
+    const isHttps =
+      req.secure ||
+      forwardedProto.toLowerCase().includes('https') ||
+      process.env.NODE_ENV === 'production';
+    const parts = [
+      `${SESSION_COOKIE_NAME}=`,
+      'HttpOnly',
+      'Path=/',
+      isHttps ? 'SameSite=None' : 'SameSite=Lax',
+      'Max-Age=0',
+    ];
+    if (isHttps) {
+      parts.push('Secure');
+    }
+    res.setHeader('Set-Cookie', parts.join('; '));
   }
 
   function extractTokenFromRequest(req: Request): string | undefined {
-    const cookies = parseCookies(req.headers.cookie);
-    if (cookies[SESSION_COOKIE_NAME]) {
-      return cookies[SESSION_COOKIE_NAME];
+    const headerToken = (req.headers['x-session-token'] as string)?.trim();
+    if (headerToken) {
+      return headerToken;
     }
     const authHeader = req.headers.authorization;
     if (authHeader && authHeader.startsWith('Bearer ')) {
-      return authHeader.slice(7).trim();
+      const bearer = authHeader.slice(7).trim();
+      if (bearer) return bearer;
+    }
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies[SESSION_COOKIE_NAME]) {
+      return cookies[SESSION_COOKIE_NAME];
     }
     return undefined;
   }
@@ -139,7 +166,7 @@ export function createApp(options?: CreateAppOptions) {
     const validation = sessionStore.validateSession(token, serverDb.getUsers());
 
     if (!validation.valid || !validation.user || !validation.session) {
-      clearSessionCookie(res);
+      clearSessionCookie(req, res);
       res.status(401).json({
         success: false,
         authenticated: false,
@@ -208,7 +235,7 @@ export function createApp(options?: CreateAppOptions) {
 
     if (!validation.valid || !validation.user || !validation.session) {
       if (token) {
-        clearSessionCookie(res);
+        clearSessionCookie(req, res);
       }
       res.json({
         authenticated: false,
@@ -221,6 +248,7 @@ export function createApp(options?: CreateAppOptions) {
       authenticated: true,
       setupRequired: false,
       user: sanitizeUserForClient(validation.user),
+      sessionToken: validation.session.token,
       csrfToken: validation.session.csrfToken,
       expiresAt: new Date(validation.session.expiresAt).toISOString(),
     });
@@ -248,11 +276,12 @@ export function createApp(options?: CreateAppOptions) {
 
     persistServerState();
     const session = sessionStore.createSession(result.user);
-    setSessionCookie(res, session.token);
+    setSessionCookie(req, res, session.token);
 
     res.status(201).json({
       success: true,
       user: sanitizeUserForClient(result.user),
+      sessionToken: session.token,
       csrfToken: session.csrfToken,
       expiresAt: new Date(session.expiresAt).toISOString(),
     });
@@ -318,11 +347,12 @@ export function createApp(options?: CreateAppOptions) {
     persistServerState();
 
     const session = sessionStore.createSession(authResult.user);
-    setSessionCookie(res, session.token);
+    setSessionCookie(req, res, session.token);
 
     res.json({
       success: true,
       user: sanitizeUserForClient(authResult.user),
+      sessionToken: session.token,
       csrfToken: session.csrfToken,
       expiresAt: new Date(session.expiresAt).toISOString(),
     });
@@ -346,7 +376,7 @@ export function createApp(options?: CreateAppOptions) {
       }
       sessionStore.invalidateSession(token);
     }
-    clearSessionCookie(res);
+    clearSessionCookie(req, res);
     res.json({ success: true });
   });
 
@@ -501,10 +531,11 @@ export function createApp(options?: CreateAppOptions) {
       if (req.authUser && req.authUser.id === targetId) {
         const refreshedUser = serverDb.getUsers().find((u) => u.id === targetId)!;
         const newSession = sessionStore.createSession(refreshedUser);
-        setSessionCookie(res, newSession.token);
+        setSessionCookie(req, res, newSession.token);
         persistServerState();
         res.json({
           success: true,
+          sessionToken: newSession.token,
           csrfToken: newSession.csrfToken,
           state: serverDb.getSanitizedStateForClient(),
         });

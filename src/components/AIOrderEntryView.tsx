@@ -35,6 +35,7 @@ import {
   ParsedOrderDraft,
   recalculateAndValidateDraft,
 } from '../utils/aiOrderParser';
+import { safeApiFetch } from '../utils/authClient';
 import { BANGLADESH_DISTRICTS } from '../utils/districtData';
 
 interface AIOrderEntryViewProps {
@@ -127,33 +128,29 @@ export const AIOrderEntryView: React.FC<AIOrderEntryViewProps> = ({
     setFeedbackBanner(null);
 
     try {
-      const response = await fetch('/api/ai/parse-order', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-csrf-token': csrfToken || '',
+      const res = await safeApiFetch(
+        '/api/ai/parse-order',
+        {
+          method: 'POST',
+          body: JSON.stringify({
+            rawText: sourceText,
+            isBatch: mode === 'batch',
+            catalogue: activeProducts,
+            existingOrders,
+            settings: {
+              defaultInsideDhakaFee: settings.defaultInsideDhakaFee || 80,
+              defaultOutsideDhakaFee: settings.defaultOutsideDhakaFee || 120,
+            },
+          }),
         },
-        body: JSON.stringify({
-          rawText: sourceText,
-          isBatch: mode === 'batch',
-          catalogue: activeProducts,
-          existingOrders,
-          settings: {
-            defaultInsideDhakaFee: settings.defaultInsideDhakaFee || 80,
-            defaultOutsideDhakaFee: settings.defaultOutsideDhakaFee || 120,
-          },
-        }),
-      });
+        csrfToken
+      );
 
-      if (response.ok) {
-        const data = await response.json();
-        if (data.success && Array.isArray(data.drafts) && data.drafts.length > 0) {
-          setDrafts(data.drafts);
-          setActiveDraftIndex(0);
-          setIsParsing(false);
-          return;
-        }
+      if (res.reachable && res.ok && res.data?.success && Array.isArray(res.data.drafts) && res.data.drafts.length > 0) {
+        setDrafts(res.data.drafts);
+        setActiveDraftIndex(0);
+        setIsParsing(false);
+        return;
       }
     } catch (_err) {
       // Fall back to deterministic client-side parser if server call fails

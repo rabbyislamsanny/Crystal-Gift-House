@@ -32,6 +32,20 @@ import { AcceptanceTestsModal } from './components/AcceptanceTestsModal';
 import { ConfirmModal } from './components/ConfirmModal';
 import { calculateAvailableStock } from './utils/stockCalculations';
 import { hasPermission, ROLE_LABELS } from './utils/authSecurity';
+import {
+  checkAuthSessionStatus,
+  clearActiveSessionTokens,
+  createUserOnServer,
+  deleteUserOnServer,
+  fetchAuthoritativeState,
+  loginWithAuthServer,
+  logoutFromAuthServer,
+  resetPasswordOnServer,
+  revokeUserOnServer,
+  syncStateWithServer,
+  updateRolePermissionsOnServer,
+  updateUserOnServer,
+} from './utils/authClient';
 import { ShieldAlert, Lock } from 'lucide-react';
 
 const TAB_TO_MODULE: Record<ActiveTab, AppModule> = {
@@ -84,7 +98,7 @@ export default function App() {
   });
 
   const handleUnauthorizedSession = useCallback((notice?: string) => {
-    db.clearClientStorage();
+    clearActiveSessionTokens();
     setIsAuthenticated(false);
     setCurrentUser(null);
     setDbState(null);
@@ -103,29 +117,24 @@ export default function App() {
   const loadAuthenticatedState = useCallback(
     async (fallbackUser?: UserAccount, fallbackCsrf?: string) => {
       try {
-        const res = await fetch('/api/state', {
-          method: 'GET',
-          credentials: 'include',
-        });
-        if (res.status === 401) {
+        const result = await fetchAuthoritativeState(fallbackCsrf);
+        if (!result.authenticated || !result.state) {
           handleUnauthorizedSession('Please sign in to access Crystal Gift House Business OS.');
           return false;
         }
-        const data = await res.json();
-        if (res.ok && data.success && data.state) {
-          const resolvedUser: UserAccount = data.currentUser || fallbackUser || data.state.users[0];
-          const resolvedCsrf: string = data.csrfToken || fallbackCsrf || '';
-          db.hydrateFromServer(data.state, resolvedUser);
-          setDbState(data.state);
-          setCurrentUser(resolvedUser);
-          setCsrfToken(resolvedCsrf);
-          setIsAuthenticated(true);
-          setSetupRequired(false);
-          if (typeof window !== 'undefined' && window.location.pathname === '/login') {
-            window.history.replaceState(null, '', '/');
-          }
-          return true;
+        const resolvedUser: UserAccount =
+          result.currentUser || fallbackUser || result.state.users[0];
+        const resolvedCsrf: string = result.csrfToken || fallbackCsrf || '';
+        db.hydrateFromServer(result.state, resolvedUser);
+        setDbState(result.state);
+        setCurrentUser(resolvedUser);
+        setCsrfToken(resolvedCsrf);
+        setIsAuthenticated(true);
+        setSetupRequired(false);
+        if (typeof window !== 'undefined' && window.location.pathname === '/login') {
+          window.history.replaceState(null, '', '/');
         }
+        return true;
       } catch (err) {
         console.error('Error loading authenticated state:', err);
       }
@@ -139,26 +148,34 @@ export default function App() {
     let mounted = true;
     async function verifySession() {
       try {
-        const res = await fetch('/api/auth/status', {
-          method: 'GET',
-          credentials: 'include',
-        });
-        const data = await res.json();
+        const status = await checkAuthSessionStatus();
         if (!mounted) return;
 
-        if (data.authenticated && data.user) {
-          await loadAuthenticatedState(data.user, data.csrfToken);
+        if (status.authenticated && status.user) {
+          if (status.state) {
+            db.hydrateFromServer(status.state, status.user);
+            setDbState(status.state);
+            setCurrentUser(status.user);
+            setCsrfToken(status.csrfToken || '');
+            setIsAuthenticated(true);
+            setSetupRequired(false);
+            if (typeof window !== 'undefined' && window.location.pathname === '/login') {
+              window.history.replaceState(null, '', '/');
+            }
+          } else {
+            await loadAuthenticatedState(status.user, status.csrfToken);
+          }
         } else {
-          db.clearClientStorage();
+          clearActiveSessionTokens();
           setIsAuthenticated(false);
-          setSetupRequired(Boolean(data.setupRequired));
+          setSetupRequired(Boolean(status.setupRequired));
           if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
             window.history.replaceState(null, '', '/login');
           }
         }
       } catch {
         if (mounted) {
-          db.clearClientStorage();
+          clearActiveSessionTokens();
           setIsAuthenticated(false);
         }
       } finally {
@@ -176,18 +193,9 @@ export default function App() {
   // Synchronize state changes to protected server database
   const syncStateToServer = useCallback(
     async (updatedState: DatabaseState) => {
-      if (!csrfToken) return;
       try {
-        const res = await fetch('/api/state/sync', {
-          method: 'POST',
-          credentials: 'include',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-csrf-token': csrfToken,
-          },
-          body: JSON.stringify({ state: updatedState }),
-        });
-        if (res.status === 401) {
+        const res = await syncStateWithServer(updatedState, csrfToken);
+        if (!res.authenticated) {
           handleUnauthorizedSession(
             'Your session has expired or access was revoked. Please sign in again.'
           );
@@ -216,10 +224,7 @@ export default function App() {
 
   const handleLogout = async () => {
     try {
-      await fetch('/api/auth/logout', {
-        method: 'POST',
-        credentials: 'include',
-      });
+      await logoutFromAuthServer(csrfToken);
     } catch {
       // proceed with client cleanup even if network fails
     }
@@ -438,32 +443,19 @@ export default function App() {
     role: UserRole;
     passwordPlain: string;
   }) => {
-    try {
-      const res = await fetch('/api/users/create', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-csrf-token': csrfToken,
-        },
-        body: JSON.stringify(input),
-      });
-      if (res.status === 401) {
-        handleUnauthorizedSession('Session expired. Please log in again.');
-        return { success: false, error: 'Session expired.' };
-      }
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        return { success: false, error: data.error || 'Failed to create user.' };
-      }
-      if (data.state && currentUser) {
-        db.hydrateFromServer(data.state, currentUser);
-        setDbState(data.state);
-      }
-      return { success: true, user: data.user };
-    } catch {
-      return { success: false, error: 'Network error while creating user.' };
+    const res = await createUserOnServer(input, csrfToken);
+    if (res.unauthenticated) {
+      handleUnauthorizedSession('Session expired. Please log in again.');
+      return { success: false, error: 'Session expired.' };
     }
+    if (!res.success) {
+      return { success: false, error: res.error || 'Failed to create user.' };
+    }
+    if (res.state && currentUser) {
+      db.hydrateFromServer(res.state, currentUser);
+      setDbState(res.state);
+    }
+    return { success: true, user: res.user };
   };
 
   const handleUpdateUser = async (
@@ -476,176 +468,101 @@ export default function App() {
       isActive?: boolean;
     }
   ) => {
-    try {
-      const res = await fetch('/api/users/update', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-csrf-token': csrfToken,
-        },
-        body: JSON.stringify({ userId, updates }),
-      });
-      if (res.status === 401) {
-        handleUnauthorizedSession('Session expired. Please log in again.');
-        return { success: false, error: 'Session expired.' };
-      }
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        return { success: false, error: data.error || 'Failed to update user.' };
-      }
-      if (data.state && currentUser) {
-        const updatedSelf =
-          userId === currentUser.id ? data.user || currentUser : currentUser;
-        db.hydrateFromServer(data.state, updatedSelf);
-        setDbState(data.state);
-        setCurrentUser(updatedSelf);
-      }
-      return { success: true, user: data.user };
-    } catch {
-      return { success: false, error: 'Network error while updating user.' };
+    const res = await updateUserOnServer(userId, updates, csrfToken);
+    if (res.unauthenticated) {
+      handleUnauthorizedSession('Session expired. Please log in again.');
+      return { success: false, error: 'Session expired.' };
     }
+    if (!res.success) {
+      return { success: false, error: res.error || 'Failed to update user.' };
+    }
+    if (res.state && currentUser) {
+      const updatedSelf =
+        userId === currentUser.id ? res.user || currentUser : currentUser;
+      db.hydrateFromServer(res.state, updatedSelf);
+      setDbState(res.state);
+      setCurrentUser(updatedSelf);
+    }
+    return { success: true, user: res.user };
   };
 
   const handleResetPassword = async (userId: string, newPasswordPlain: string) => {
-    try {
-      const res = await fetch('/api/users/reset-password', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-csrf-token': csrfToken,
-        },
-        body: JSON.stringify({ userId, newPasswordPlain }),
-      });
-      if (res.status === 401) {
-        handleUnauthorizedSession('Session expired. Please log in again.');
-        return { success: false, error: 'Session expired.' };
-      }
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        return { success: false, error: data.error || 'Password reset failed.' };
-      }
-      if (data.csrfToken) {
-        setCsrfToken(data.csrfToken);
-      }
-      if (data.state && currentUser) {
-        db.hydrateFromServer(data.state, currentUser);
-        setDbState(data.state);
-      }
-      return { success: true };
-    } catch {
-      return { success: false, error: 'Network error while resetting password.' };
+    const res = await resetPasswordOnServer(userId, newPasswordPlain, csrfToken);
+    if (res.unauthenticated) {
+      handleUnauthorizedSession('Session expired. Please log in again.');
+      return { success: false, error: 'Session expired.' };
     }
+    if (!res.success) {
+      return { success: false, error: res.error || 'Password reset failed.' };
+    }
+    if (res.csrfToken) {
+      setCsrfToken(res.csrfToken);
+    }
+    if (res.state && currentUser) {
+      db.hydrateFromServer(res.state, currentUser);
+      setDbState(res.state);
+    }
+    return { success: true };
   };
 
   const handleRevokeAccess = async (userId: string, reason?: string) => {
-    try {
-      const res = await fetch('/api/users/revoke', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-csrf-token': csrfToken,
-        },
-        body: JSON.stringify({ userId, reason }),
-      });
-      if (res.status === 401) {
-        handleUnauthorizedSession('Session expired. Please log in again.');
-        return { success: false, error: 'Session expired.' };
-      }
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        return { success: false, error: data.error || 'Cannot revoke access.' };
-      }
-      if (data.state && currentUser) {
-        db.hydrateFromServer(data.state, currentUser);
-        setDbState(data.state);
-      }
-      return { success: true };
-    } catch {
-      return { success: false, error: 'Network error while revoking access.' };
+    const res = await revokeUserOnServer(userId, reason, csrfToken);
+    if (res.unauthenticated) {
+      handleUnauthorizedSession('Session expired. Please log in again.');
+      return { success: false, error: 'Session expired.' };
     }
+    if (!res.success) {
+      return { success: false, error: res.error || 'Cannot revoke access.' };
+    }
+    if (res.state && currentUser) {
+      db.hydrateFromServer(res.state, currentUser);
+      setDbState(res.state);
+    }
+    return { success: true };
   };
 
   const handleDeleteUser = async (userId: string, reason?: string) => {
-    try {
-      const res = await fetch('/api/users/delete', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-csrf-token': csrfToken,
-        },
-        body: JSON.stringify({ userId, reason }),
-      });
-      if (res.status === 401) {
-        handleUnauthorizedSession('Session expired. Please log in again.');
-        return { success: false, error: 'Session expired.' };
-      }
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        return { success: false, error: data.error || 'Cannot delete user.' };
-      }
-      if (data.state && currentUser) {
-        db.hydrateFromServer(data.state, currentUser);
-        setDbState(data.state);
-      }
-      return { success: true };
-    } catch {
-      return { success: false, error: 'Network error while deleting user.' };
+    const res = await deleteUserOnServer(userId, reason, csrfToken);
+    if (res.unauthenticated) {
+      handleUnauthorizedSession('Session expired. Please log in again.');
+      return { success: false, error: 'Session expired.' };
     }
+    if (!res.success) {
+      return { success: false, error: res.error || 'Cannot delete user.' };
+    }
+    if (res.state && currentUser) {
+      db.hydrateFromServer(res.state, currentUser);
+      setDbState(res.state);
+    }
+    return { success: true };
   };
 
   const handleUpdateRolePermissions = async (
     role: UserRole,
     modulePermissions: Record<AppModule, PermissionAction[]>
   ) => {
-    try {
-      const res = await fetch('/api/users/role-permissions', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-csrf-token': csrfToken,
-        },
-        body: JSON.stringify({ role, modulePermissions }),
-      });
-      if (res.status === 401) {
-        handleUnauthorizedSession('Session expired. Please log in again.');
-        return { success: false, error: 'Session expired.' };
-      }
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        return { success: false, error: data.error || 'Failed to update role permissions.' };
-      }
-      if (data.state && currentUser) {
-        db.hydrateFromServer(data.state, currentUser);
-        setDbState(data.state);
-      }
-      return { success: true };
-    } catch {
-      return { success: false, error: 'Network error while updating permissions.' };
+    const res = await updateRolePermissionsOnServer(role, modulePermissions, csrfToken);
+    if (res.unauthenticated) {
+      handleUnauthorizedSession('Session expired. Please log in again.');
+      return { success: false, error: 'Session expired.' };
     }
+    if (!res.success) {
+      return { success: false, error: res.error || 'Failed to update role permissions.' };
+    }
+    if (res.state && currentUser) {
+      db.hydrateFromServer(res.state, currentUser);
+      setDbState(res.state);
+    }
+    return { success: true };
   };
 
   const handleAuthenticateUser = async (username: string, passwordPlain: string) => {
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password: passwordPlain }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        return { success: false, error: data.error || 'Invalid login credentials.' };
-      }
-      await loadAuthenticatedState(data.user, data.csrfToken);
-      return { success: true, user: data.user };
-    } catch {
-      return { success: false, error: 'Network error during authentication.' };
+    const res = await loginWithAuthServer(username, passwordPlain);
+    if (!res.success || !res.user) {
+      return { success: false, error: res.error || 'Invalid login credentials.' };
     }
+    await loadAuthenticatedState(res.user, res.csrfToken);
+    return { success: true, user: res.user };
   };
 
   // 1. Loading spinner while verifying session cookie with backend

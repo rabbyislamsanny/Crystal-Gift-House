@@ -12,6 +12,10 @@ import {
   ArrowRight,
 } from 'lucide-react';
 import { UserAccount } from '../types/database';
+import {
+  loginWithAuthServer,
+  setupSuperAdminWithAuthServer,
+} from '../utils/authClient';
 
 interface LoginPageProps {
   setupRequired: boolean;
@@ -57,22 +61,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
     setIsSubmitting(true);
     try {
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          username: cleanIdentifier,
-          password,
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok || !data.success) {
-        if (typeof data.remainingAttempts === 'number') {
-          setRemainingAttempts(data.remainingAttempts);
+      const result = await loginWithAuthServer(cleanIdentifier, password);
+      if (!result.success || !result.user) {
+        if (typeof result.remainingAttempts === 'number') {
+          setRemainingAttempts(result.remainingAttempts);
         }
-        setErrorMessage(data.error || 'Authentication failed. Please check your credentials.');
+        setErrorMessage(result.error || 'Authentication failed. Please check your credentials.');
         setIsSubmitting(false);
         return;
       }
@@ -80,11 +74,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       setPassword('');
       setRemainingAttempts(null);
       onLoginSuccess({
-        user: data.user,
-        csrfToken: data.csrfToken,
+        user: result.user,
+        csrfToken: result.csrfToken || '',
       });
-    } catch {
-      setErrorMessage('Network error while connecting to authentication server. Please try again.');
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Authentication failed. Please verify your credentials.');
       setIsSubmitting(false);
     }
   };
@@ -116,22 +110,16 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
     setIsSubmitting(true);
     try {
-      const response = await fetch('/api/auth/setup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          fullName: setupFullName.trim(),
-          username: setupUsername.trim(),
-          email: setupEmail.trim(),
-          phone: setupPhone.trim(),
-          password: setupPassword,
-        }),
+      const result = await setupSuperAdminWithAuthServer({
+        fullName: setupFullName.trim(),
+        username: setupUsername.trim(),
+        email: setupEmail.trim(),
+        phone: setupPhone.trim(),
+        password: setupPassword,
       });
 
-      const data = await response.json();
-      if (!response.ok || !data.success) {
-        setErrorMessage(data.error || 'Initial setup failed.');
+      if (!result.success || !result.user) {
+        setErrorMessage(result.error || 'Initial setup failed.');
         setIsSubmitting(false);
         return;
       }
@@ -139,11 +127,11 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       setSetupPassword('');
       setSetupConfirmPassword('');
       onLoginSuccess({
-        user: data.user,
-        csrfToken: data.csrfToken,
+        user: result.user,
+        csrfToken: result.csrfToken || '',
       });
-    } catch {
-      setErrorMessage('Network error while initializing Super Admin account.');
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Initial setup failed. Please verify your details.');
       setIsSubmitting(false);
     }
   };
