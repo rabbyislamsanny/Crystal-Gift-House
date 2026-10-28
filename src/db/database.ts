@@ -44,6 +44,8 @@ import {
   hasPermission,
   validateUserModification,
   sanitizeAuditDetails,
+  sanitizeUserForClient,
+  validateInitialSuperAdminSetup,
 } from '../utils/authSecurity';
 
 const STORAGE_KEY = 'cgh_business_os_db_v1';
@@ -856,14 +858,20 @@ export function getDefaultState(): DatabaseState {
   };
 }
 
-class DatabaseService {
+export class DatabaseService {
   private state: DatabaseState;
   private memoryStorage: Record<string, string> = {};
   private currentUserId: string = 'user-1';
+  private allowEmptyUsers: boolean = false;
 
-  constructor() {
+  constructor(options?: { initialEmptySetup?: boolean }) {
+    this.allowEmptyUsers = Boolean(options?.initialEmptySetup);
     this.state = this.loadFromStorage();
-    this.ensureCatalogueAndUsersUpToDate();
+    if (this.allowEmptyUsers) {
+      this.state.users = [];
+    } else {
+      this.ensureCatalogueAndUsersUpToDate();
+    }
     this.reconcileReservedStock();
   }
 
@@ -986,6 +994,82 @@ class DatabaseService {
     }
   }
 
+  public clearClientStorage(): void {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.removeItem(STORAGE_KEY);
+      }
+      this.memoryStorage = {};
+    } catch {
+      // ignore storage cleanup errors
+    }
+  }
+
+  public hydrateFromServer(serverState: DatabaseState, authenticatedUser?: UserAccount): void {
+    this.state = {
+      ...this.state,
+      ...serverState,
+    };
+    if (authenticatedUser) {
+      this.currentUserId = authenticatedUser.id;
+    }
+  }
+
+  public getSanitizedStateForClient(): DatabaseState {
+    return {
+      ...this.state,
+      users: this.state.users.map((u) => sanitizeUserForClient(u)),
+      settings: {
+        ...this.state.settings,
+        ownerPin: '[PROTECTED]',
+      },
+    };
+  }
+
+  public hasSuperAdmin(): boolean {
+    return this.state.users.some((u) => u.role === 'super_admin');
+  }
+
+  public setupInitialSuperAdmin(input: {
+    username: string;
+    fullName: string;
+    email: string;
+    phone?: string;
+    passwordPlain: string;
+  }): {
+    success: boolean;
+    status: number;
+    user?: UserAccount;
+    error?: string;
+  } {
+    const check = validateInitialSuperAdminSetup(this.state.users, input);
+    if (!check.allowed || !check.user) {
+      this.logAudit(
+        'SETUP_ATTEMPT_BLOCKED',
+        'Security',
+        'SETUP',
+        `Blocked initial Super Admin setup attempt: ${check.error || 'Setup already completed'}`,
+        'Anonymous',
+        'users'
+      );
+      return { success: false, status: check.status, error: check.error };
+    }
+
+    this.allowEmptyUsers = false;
+    this.state.users.unshift(check.user);
+    this.currentUserId = check.user.id;
+    this.logAudit(
+      'INITIAL_SUPER_ADMIN_SETUP',
+      'User',
+      check.user.id,
+      `Initialized primary Super Admin account for ${check.user.fullName} (@${check.user.username}, ${check.user.email}). One-time setup permanently locked.`,
+      check.user.fullName,
+      'users'
+    );
+    this.saveToStorage();
+    return { success: true, status: 201, user: check.user };
+  }
+
   public getState(): DatabaseState {
     return { ...this.state };
   }
@@ -994,8 +1078,11 @@ class DatabaseService {
     const found = this.state.users.find((u) => u.id === this.currentUserId && u.isActive);
     if (found) return found;
     const fallback = this.state.users.find((u) => u.role === 'super_admin' && u.isActive) || this.state.users[0];
-    this.currentUserId = fallback.id;
-    return fallback;
+    if (fallback) {
+      this.currentUserId = fallback.id;
+      return fallback;
+    }
+    return INITIAL_USERS[0];
   }
 
   public setCurrentUser(userId: string): { success: boolean; user?: UserAccount; error?: string } {
@@ -1023,8 +1110,8 @@ class DatabaseService {
       this.logAudit('AUTH_FAILED', 'User', 'UNKNOWN', `Failed login attempt for unknown username "${cleanLogin}"`, 'Anonymous', 'users');
       return { success: false, error: 'Invalid username or password.' };
     }
-    if (!user.isActive) {
-      this.logAudit('AUTH_BLOCKED', 'User', user.id, `Blocked login attempt for deactivated user @${user.username}`, user.fullName, 'users');
+    if (!user.isActive || user.revokedAt) {
+      this.logAudit('AUTH_BLOCKED', 'User', user.id, `Blocked login attempt for deactivated/revoked user @${user.username}`, user.fullName, 'users');
       return { success: false, error: 'Account is deactivated or access has been revoked. Contact Super Admin.' };
     }
     const valid = verifyPasswordSync(passwordPlain, user.passwordSalt, user.passwordHash);
@@ -1175,7 +1262,14 @@ class DatabaseService {
     if (updates.email !== undefined) target.email = updates.email.trim();
     if (updates.phone !== undefined) target.phone = updates.phone.trim();
     if (updates.role !== undefined) target.role = updates.role;
-    if (updates.isActive !== undefined) target.isActive = updates.isActive;
+    if (updates.isActive !== undefined) {
+      target.isActive = updates.isActive;
+      if (updates.isActive) {
+        target.revokedAt = undefined;
+      } else {
+        target.sessionVersion = (target.sessionVersion || 1) + 1;
+      }
+    }
     if (updates.customPermissions !== undefined) target.customPermissions = updates.customPermissions;
     target.updatedAt = new Date().toISOString();
 

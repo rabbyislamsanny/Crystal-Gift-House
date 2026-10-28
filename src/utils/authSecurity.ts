@@ -318,3 +318,325 @@ export function sanitizeAuditDetails(details: string): string {
     .replace(/(password|passwd|pwd|pin|secret|token|apiKey)\s*[:=]\s*["']?[^\s,;)"']+["']?/gi, '$1: [REDACTED]')
     .replace(/pbkdf2_cgh\$[0-9a-f]+/gi, '[HASH_REDACTED]');
 }
+
+/**
+ * Strips passwordSalt and raw passwordHash before sending user objects to the client.
+ */
+export function sanitizeUserForClient(user: UserAccount): UserAccount {
+  return {
+    ...user,
+    passwordSalt: '[REDACTED]',
+    passwordHash: user.passwordHash ? `${user.passwordHash.slice(0, 18)}...[PROTECTED]` : '[PROTECTED]',
+  };
+}
+
+/**
+ * Parses an HTTP Cookie header into key-value pairs.
+ */
+export function parseCookies(cookieHeader: string | undefined): Record<string, string> {
+  const result: Record<string, string> = {};
+  if (!cookieHeader) return result;
+  const pairs = cookieHeader.split(';');
+  for (const pair of pairs) {
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = pair.slice(0, eqIdx).trim();
+    const rawVal = pair.slice(eqIdx + 1).trim();
+    if (!key) continue;
+    try {
+      result[key] = decodeURIComponent(rawVal);
+    } catch {
+      result[key] = rawVal;
+    }
+  }
+  return result;
+}
+
+/**
+ * Generates a high-entropy random token for session IDs and CSRF tokens.
+ */
+export function generateSecureToken(prefix: string = 'cgh'): string {
+  const chars = '0123456789abcdefABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  let randomPart = '';
+  if (typeof globalThis.crypto !== 'undefined' && typeof globalThis.crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(bytes);
+    for (let i = 0; i < bytes.length; i++) {
+      randomPart += chars[bytes[i] % chars.length];
+    }
+  } else {
+    for (let i = 0; i < 32; i++) {
+      randomPart += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+  }
+  return `${prefix}_${Date.now().toString(36)}_${randomPart}`;
+}
+
+export interface RateLimitEntry {
+  failures: number;
+  firstFailureAt: number;
+  lockedUntil: number;
+}
+
+/**
+ * Tracks failed login attempts per IP/account and enforces temporary lockouts.
+ */
+export class LoginRateLimiter {
+  private attempts = new Map<string, RateLimitEntry>();
+  private readonly maxAttempts: number;
+  private readonly windowMs: number;
+  private readonly lockoutMs: number;
+
+  constructor(options?: { maxAttempts?: number; windowMs?: number; lockoutMs?: number }) {
+    this.maxAttempts = options?.maxAttempts ?? 5;
+    this.windowMs = options?.windowMs ?? 15 * 60 * 1000; // 15 minutes
+    this.lockoutMs = options?.lockoutMs ?? 15 * 60 * 1000; // 15 minutes lockout
+  }
+
+  private normalizeKey(key: string): string {
+    return (key || 'unknown').trim().toLowerCase();
+  }
+
+  public check(key: string, nowMs: number = Date.now()): {
+    allowed: boolean;
+    remainingAttempts: number;
+    retryAfterSeconds: number;
+  } {
+    const k = this.normalizeKey(key);
+    const entry = this.attempts.get(k);
+    if (!entry) {
+      return { allowed: true, remainingAttempts: this.maxAttempts, retryAfterSeconds: 0 };
+    }
+
+    if (entry.lockedUntil > nowMs) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((entry.lockedUntil - nowMs) / 1000));
+      return { allowed: false, remainingAttempts: 0, retryAfterSeconds };
+    }
+
+    if (nowMs - entry.firstFailureAt > this.windowMs) {
+      this.attempts.delete(k);
+      return { allowed: true, remainingAttempts: this.maxAttempts, retryAfterSeconds: 0 };
+    }
+
+    const remainingAttempts = Math.max(0, this.maxAttempts - entry.failures);
+    return { allowed: remainingAttempts > 0, remainingAttempts, retryAfterSeconds: 0 };
+  }
+
+  public recordFailure(key: string, nowMs: number = Date.now()): {
+    locked: boolean;
+    remainingAttempts: number;
+    retryAfterSeconds: number;
+  } {
+    const k = this.normalizeKey(key);
+    const existing = this.attempts.get(k);
+
+    if (!existing || nowMs - existing.firstFailureAt > this.windowMs || (existing.lockedUntil > 0 && existing.lockedUntil <= nowMs)) {
+      const failures = 1;
+      const locked = failures >= this.maxAttempts;
+      const lockedUntil = locked ? nowMs + this.lockoutMs : 0;
+      this.attempts.set(k, { failures, firstFailureAt: nowMs, lockedUntil });
+      return {
+        locked,
+        remainingAttempts: Math.max(0, this.maxAttempts - failures),
+        retryAfterSeconds: locked ? Math.ceil(this.lockoutMs / 1000) : 0,
+      };
+    }
+
+    existing.failures += 1;
+    if (existing.failures >= this.maxAttempts) {
+      existing.lockedUntil = nowMs + this.lockoutMs;
+    }
+    this.attempts.set(k, existing);
+
+    const locked = existing.lockedUntil > nowMs;
+    const retryAfterSeconds = locked ? Math.max(1, Math.ceil((existing.lockedUntil - nowMs) / 1000)) : 0;
+    return {
+      locked,
+      remainingAttempts: Math.max(0, this.maxAttempts - existing.failures),
+      retryAfterSeconds,
+    };
+  }
+
+  public reset(key: string): void {
+    this.attempts.delete(this.normalizeKey(key));
+  }
+
+  public clearAll(): void {
+    this.attempts.clear();
+  }
+}
+
+export interface ServerSessionRecord {
+  token: string;
+  csrfToken: string;
+  userId: string;
+  username: string;
+  role: UserRole;
+  sessionVersion: number;
+  issuedAt: number;
+  expiresAt: number;
+}
+
+/**
+ * Authoritative server-side session store with expiration, CSRF token pairing,
+ * and automatic invalidation when a user's sessionVersion changes or account is deactivated.
+ */
+export class ServerSessionStore {
+  private sessions = new Map<string, ServerSessionRecord>();
+  private readonly defaultTtlMs: number;
+
+  constructor(defaultTtlMs: number = 12 * 60 * 60 * 1000) {
+    this.defaultTtlMs = defaultTtlMs;
+  }
+
+  public createSession(
+    user: Pick<UserAccount, 'id' | 'username' | 'role' | 'sessionVersion'>,
+    ttlMs: number = this.defaultTtlMs,
+    nowMs: number = Date.now()
+  ): ServerSessionRecord {
+    const token = generateSecureToken('cgh_sess');
+    const csrfToken = generateSecureToken('cgh_csrf');
+    const record: ServerSessionRecord = {
+      token,
+      csrfToken,
+      userId: user.id,
+      username: user.username,
+      role: user.role,
+      sessionVersion: user.sessionVersion || 1,
+      issuedAt: nowMs,
+      expiresAt: nowMs + ttlMs,
+    };
+    this.sessions.set(token, record);
+    return record;
+  }
+
+  public validateSession(
+    token: string | undefined,
+    users: UserAccount[],
+    nowMs: number = Date.now()
+  ): {
+    valid: boolean;
+    session?: ServerSessionRecord;
+    user?: UserAccount;
+    reason?: string;
+  } {
+    if (!token) {
+      return { valid: false, reason: 'No session token provided.' };
+    }
+    const session = this.sessions.get(token);
+    if (!session) {
+      return { valid: false, reason: 'Session not found or already logged out.' };
+    }
+    if (nowMs > session.expiresAt) {
+      this.sessions.delete(token);
+      return { valid: false, reason: 'Session has expired. Please log in again.' };
+    }
+
+    const user = users.find((u) => u.id === session.userId);
+    if (!user) {
+      this.sessions.delete(token);
+      return { valid: false, reason: 'User account no longer exists.' };
+    }
+    if (!user.isActive || user.revokedAt) {
+      this.sessions.delete(token);
+      return { valid: false, reason: 'User account is deactivated or access has been revoked.' };
+    }
+    if ((user.sessionVersion || 1) !== session.sessionVersion) {
+      this.sessions.delete(token);
+      return { valid: false, reason: 'Session invalidated due to password reset or security rotation.' };
+    }
+
+    return { valid: true, session, user };
+  }
+
+  public invalidateSession(token: string | undefined): boolean {
+    if (!token) return false;
+    return this.sessions.delete(token);
+  }
+
+  public invalidateUserSessions(userId: string): number {
+    let removed = 0;
+    for (const [token, sess] of this.sessions.entries()) {
+      if (sess.userId === userId) {
+        this.sessions.delete(token);
+        removed++;
+      }
+    }
+    return removed;
+  }
+}
+
+/**
+ * Validates and constructs the one-time initial Super Admin account.
+ * Permanently rejects setup once any Super Admin account already exists.
+ */
+export function validateInitialSuperAdminSetup(
+  existingUsers: UserAccount[],
+  input: {
+    username: string;
+    fullName: string;
+    email: string;
+    phone?: string;
+    passwordPlain: string;
+  }
+): {
+  allowed: boolean;
+  status: number;
+  user?: UserAccount;
+  error?: string;
+} {
+  const hasSuperAdmin = existingUsers.some((u) => u.role === 'super_admin');
+  if (hasSuperAdmin) {
+    return {
+      allowed: false,
+      status: 403,
+      error: 'Initial Super Admin setup has already been completed and is permanently disabled.',
+    };
+  }
+
+  const cleanUsername = (input.username || '').trim().toLowerCase();
+  const cleanFullName = (input.fullName || '').trim();
+  const cleanEmail = (input.email || '').trim().toLowerCase();
+  const cleanPhone = (input.phone || '').trim();
+  const passwordPlain = input.passwordPlain || '';
+
+  if (!cleanUsername || cleanUsername.length < 3) {
+    return { allowed: false, status: 400, error: 'Username must be at least 3 characters.' };
+  }
+  if (!cleanFullName || cleanFullName.length < 2) {
+    return { allowed: false, status: 400, error: 'Full name is required.' };
+  }
+  if (!cleanEmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return { allowed: false, status: 400, error: 'A valid email address is required.' };
+  }
+  if (!passwordPlain || passwordPlain.length < 8) {
+    return {
+      allowed: false,
+      status: 400,
+      error: 'Initial Super Admin password must be at least 8 characters.',
+    };
+  }
+
+  const salt = generateSalt();
+  const passwordHash = hashPasswordSync(passwordPlain, salt);
+  const now = new Date().toISOString();
+
+  const newUser: UserAccount = {
+    id: 'user-1',
+    username: cleanUsername,
+    fullName: cleanFullName,
+    email: cleanEmail,
+    phone: cleanPhone,
+    role: 'super_admin',
+    passwordSalt: salt,
+    passwordHash,
+    isActive: true,
+    sessionVersion: 1,
+    lastLoginAt: now,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  return { allowed: true, status: 201, user: newUser };
+}
+

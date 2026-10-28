@@ -43,7 +43,7 @@ interface UserManagementViewProps {
     phone: string;
     role: UserRole;
     passwordPlain: string;
-  }) => { success: boolean; user?: UserAccount; error?: string };
+  }) => Promise<{ success: boolean; user?: UserAccount; error?: string }> | { success: boolean; user?: UserAccount; error?: string };
   onUpdateUser: (
     userId: string,
     updates: {
@@ -53,19 +53,18 @@ interface UserManagementViewProps {
       role?: UserRole;
       isActive?: boolean;
     }
-  ) => { success: boolean; user?: UserAccount; error?: string };
-  onResetPassword: (userId: string, newPasswordPlain: string) => { success: boolean; error?: string };
-  onRevokeAccess: (userId: string, reason?: string) => { success: boolean; error?: string };
-  onDeleteUser: (userId: string, reason?: string) => { success: boolean; error?: string };
+  ) => Promise<{ success: boolean; user?: UserAccount; error?: string }> | { success: boolean; user?: UserAccount; error?: string };
+  onResetPassword: (userId: string, newPasswordPlain: string) => Promise<{ success: boolean; error?: string }> | { success: boolean; error?: string };
+  onRevokeAccess: (userId: string, reason?: string) => Promise<{ success: boolean; error?: string }> | { success: boolean; error?: string };
+  onDeleteUser: (userId: string, reason?: string) => Promise<{ success: boolean; error?: string }> | { success: boolean; error?: string };
   onUpdateRolePermissions: (
     role: UserRole,
     modulePermissions: Record<AppModule, PermissionAction[]>
-  ) => { success: boolean; error?: string };
-  onSwitchUser: (userId: string) => { success: boolean; user?: UserAccount; error?: string };
+  ) => Promise<{ success: boolean; error?: string }> | { success: boolean; error?: string };
   onAuthenticateUser: (
     username: string,
     passwordPlain: string
-  ) => { success: boolean; user?: UserAccount; error?: string };
+  ) => Promise<{ success: boolean; user?: UserAccount; error?: string }> | { success: boolean; user?: UserAccount; error?: string };
 }
 
 const MODULE_LABELS: Record<AppModule, string> = {
@@ -95,7 +94,6 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
   onRevokeAccess,
   onDeleteUser,
   onUpdateRolePermissions,
-  onSwitchUser,
   onAuthenticateUser,
 }) => {
   const [subTab, setSubTab] = useState<'users' | 'permissions' | 'audit'>('users');
@@ -142,9 +140,9 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
     setTimeout(() => setFeedback(null), 5000);
   };
 
-  const handleCreateSubmit = (e: React.FormEvent) => {
+  const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const res = onCreateUser({
+    const res = await onCreateUser({
       username: newUsername,
       fullName: newFullName,
       email: newEmail,
@@ -168,10 +166,10 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
     setNewPassword('');
   };
 
-  const handleEditSubmit = (e: React.FormEvent) => {
+  const handleEditSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!editingUser) return;
-    const res = onUpdateUser(editingUser.id, {
+    const res = await onUpdateUser(editingUser.id, {
       fullName: editFullName,
       email: editEmail,
       phone: editPhone,
@@ -185,10 +183,10 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
     setEditingUser(null);
   };
 
-  const handleResetPasswordSubmit = (e: React.FormEvent) => {
+  const handleResetPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!resetTargetUser) return;
-    const res = onResetPassword(resetTargetUser.id, resetPasswordValue);
+    const res = await onResetPassword(resetTargetUser.id, resetPasswordValue);
     if (!res.success) {
       showMessage('error', res.error || 'Password reset failed.');
       return;
@@ -201,7 +199,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
     setResetPasswordValue('');
   };
 
-  const handleTogglePermissionAction = (module: AppModule, action: PermissionAction) => {
+  const handleTogglePermissionAction = async (module: AppModule, action: PermissionAction) => {
     if (selectedRoleForMatrix === 'super_admin') return;
     const currentRoleMap = rolePermissions[selectedRoleForMatrix];
     const existingActions = currentRoleMap[module] || [];
@@ -214,7 +212,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       [module]: nextActions,
     };
 
-    const res = onUpdateRolePermissions(selectedRoleForMatrix, updatedMap);
+    const res = await onUpdateRolePermissions(selectedRoleForMatrix, updatedMap);
     if (!res.success) {
       showMessage('error', res.error || 'Failed to update permissions.');
     }
@@ -402,17 +400,14 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                const res = onSwitchUser(u.id);
-                                if (res.success) {
-                                  showMessage('success', `Switched active user session to ${u.fullName} (${roleMeta.name}).`);
-                                } else {
-                                  showMessage('error', res.error || 'Could not switch user.');
-                                }
+                                setLoginUsername(u.username);
+                                setLoginPassword('');
+                                setIsLoginModalOpen(true);
                               }}
                               className="px-2 py-1 text-[11px] font-semibold bg-slate-100 hover:bg-emerald-50 text-slate-700 hover:text-emerald-800 rounded border border-slate-200 cursor-pointer"
-                              title="Switch active session to test this role"
+                              title="Sign in to this account using password authentication"
                             >
-                              Switch To
+                              Sign In
                             </button>
                           )}
 
@@ -448,16 +443,16 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                               <button
                                 type="button"
                                 disabled={isLastSuper && u.isActive}
-                                onClick={() => {
+                                onClick={async () => {
                                   if (u.isActive) {
-                                    const res = onRevokeAccess(u.id, 'Revoked by Admin');
+                                    const res = await onRevokeAccess(u.id, 'Revoked by Admin');
                                     if (!res.success) {
                                       showMessage('error', res.error || 'Cannot revoke access.');
                                     } else {
                                       showMessage('success', `Revoked access and deactivated @${u.username}.`);
                                     }
                                   } else {
-                                    const res = onUpdateUser(u.id, { isActive: true });
+                                    const res = await onUpdateUser(u.id, { isActive: true });
                                     if (res.success) {
                                       showMessage('success', `Re-activated user @${u.username}.`);
                                     } else {
@@ -489,8 +484,8 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                             <button
                               type="button"
                               disabled={isLastSuper}
-                              onClick={() => {
-                                const res = onDeleteUser(u.id, 'Deleted from User Management');
+                              onClick={async () => {
+                                const res = await onDeleteUser(u.id, 'Deleted from User Management');
                                 if (!res.success) {
                                   showMessage('error', res.error || 'Cannot delete user.');
                                 } else {
@@ -953,9 +948,9 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
       {isLoginModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4">
           <form
-            onSubmit={(e) => {
+            onSubmit={async (e) => {
               e.preventDefault();
-              const res = onAuthenticateUser(loginUsername, loginPassword);
+              const res = await onAuthenticateUser(loginUsername, loginPassword);
               if (!res.success) {
                 showMessage('error', res.error || 'Authentication failed.');
                 return;
@@ -986,7 +981,7 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                   required
                   value={loginUsername}
                   onChange={(e) => setLoginUsername(e.target.value)}
-                  placeholder="mdrabbyislamsanny1@gmail.com or username"
+                  placeholder="Enter username or email"
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-mono"
                 />
               </div>
@@ -1001,12 +996,8 @@ export const UserManagementView: React.FC<UserManagementViewProps> = ({
                   className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg font-mono"
                 />
               </div>
-              <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-[10px] text-slate-600 space-y-0.5 font-mono">
-                <div>Configured Accounts (Salted Hash Verified):</div>
-                <div>• Main Super Admin: mdrabbyislamsanny1@gmail.com</div>
-                <div>• Admin: rafiq / Manager@123</div>
-                <div>• Order Manager: nusrat / Order@123</div>
-                <div>• Staff: sakib / Staff@123</div>
+              <div className="p-2.5 rounded-lg bg-slate-50 border border-slate-200 text-[10px] text-slate-600">
+                Switching accounts requires valid password verification against the server&apos;s salted password hash.
               </div>
             </div>
 

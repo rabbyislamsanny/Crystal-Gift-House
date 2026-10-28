@@ -15,6 +15,7 @@ import {
   Sparkles,
   Users,
   Wand2,
+  LogOut,
 } from 'lucide-react';
 import { AppModule, RolePermissionMap, UserAccount } from '../types/database';
 import { hasPermission, ROLE_LABELS } from '../utils/authSecurity';
@@ -44,6 +45,7 @@ interface SidebarProps {
   onOpenAcceptanceTests: () => void;
   currentUser?: UserAccount;
   rolePermissions?: RolePermissionMap;
+  onLogout?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -57,6 +59,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onOpenAcceptanceTests,
   currentUser,
   rolePermissions,
+  onLogout,
 }) => {
   const navItems: Array<{
     id: ActiveTab;
@@ -162,9 +165,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   ];
 
   const visibleItems = navItems.filter((item) => {
-    if (!currentUser || !rolePermissions) return true;
-    // Always show Users & Roles tab so users can switch/login or inspect their role
-    if (item.id === 'users') return true;
+    if (!currentUser || !rolePermissions) return false;
     return hasPermission(currentUser, rolePermissions, item.module, 'view');
   });
 
@@ -263,8 +264,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
           })}
         </nav>
 
-        {/* Acceptance Test Suite Runner Shortcut */}
-        <div className="p-3 border-t border-slate-800 bg-slate-950/60">
+        {/* Acceptance Test Suite & Logout Footer */}
+        <div className="p-3 border-t border-slate-800 bg-slate-950/60 space-y-2">
           <button
             onClick={() => {
               onOpenAcceptanceTests();
@@ -275,7 +276,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <ShieldCheck className="w-4 h-4 text-emerald-400" />
             <span>10 Acceptance Tests</span>
           </button>
-          <div className="mt-2 text-center text-[10px] text-slate-400">
+          {onLogout && (
+            <button
+              type="button"
+              onClick={() => {
+                onCloseMobile();
+                onLogout();
+              }}
+              className="flex items-center justify-center gap-2 w-full px-3 py-2 text-xs font-semibold text-red-300 bg-red-950/40 hover:bg-red-900/60 border border-red-800/40 rounded-lg transition-colors cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Log Out ({currentUser?.username || 'user'})</span>
+            </button>
+          )}
+          <div className="text-center text-[10px] text-slate-400">
             © 2026 Crystal Gift House BD
           </div>
         </div>

@@ -43,6 +43,7 @@ interface AIOrderEntryViewProps {
   settings: AppSettings;
   currentUser: UserAccount;
   rolePermissions: RolePermissionMap;
+  csrfToken?: string;
   onCreateOrder: (orderData: any) => {
     success: boolean;
     order?: Order;
@@ -86,6 +87,7 @@ export const AIOrderEntryView: React.FC<AIOrderEntryViewProps> = ({
   settings,
   currentUser,
   rolePermissions,
+  csrfToken,
   onCreateOrder,
   onSelectOrder,
 }) => {
@@ -127,12 +129,10 @@ export const AIOrderEntryView: React.FC<AIOrderEntryViewProps> = ({
     try {
       const response = await fetch('/api/ai/parse-order', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          'x-user-id': currentUser.id,
-          'x-user-username': currentUser.username,
-          'x-user-role': currentUser.role,
-          'x-user-active': String(currentUser.isActive),
+          'x-csrf-token': csrfToken || '',
         },
         body: JSON.stringify({
           rawText: sourceText,
@@ -143,8 +143,6 @@ export const AIOrderEntryView: React.FC<AIOrderEntryViewProps> = ({
             defaultInsideDhakaFee: settings.defaultInsideDhakaFee || 80,
             defaultOutsideDhakaFee: settings.defaultOutsideDhakaFee || 120,
           },
-          actor: currentUser,
-          rolePermissions,
         }),
       });
 

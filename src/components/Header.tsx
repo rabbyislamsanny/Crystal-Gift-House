@@ -3,13 +3,12 @@ import {
   Menu,
   Search,
   Plus,
-  ShieldCheck,
-  Calendar,
   X,
   Sparkles,
   Users,
   ChevronDown,
   LogOut,
+  ShieldCheck,
 } from 'lucide-react';
 import { Order, Product, Parcel, UserAccount } from '../types/database';
 import { ROLE_LABELS } from '../utils/authSecurity';
@@ -28,27 +27,20 @@ interface HeaderProps {
   parcels: Parcel[];
   dateRangeLabel: string;
   currentUser?: UserAccount;
-  users?: UserAccount[];
-  onSwitchUser?: (userId: string) => void;
-  onLockSession?: () => void;
+  onLogout?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
   onToggleMobileMenu,
   onOpenNewOrder,
   onOpenAIOrderEntry,
-  onOpenAcceptanceTests,
-  onOpenSettings,
   onOpenUserManagement,
   onSelectOrder,
   onSelectProduct,
   products,
   orders,
-  dateRangeLabel,
   currentUser,
-  users = [],
-  onSwitchUser,
-  onLockSession,
+  onLogout,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showSearchResults, setShowSearchResults] = useState(false);
@@ -228,13 +220,13 @@ export const Header: React.FC<HeaderProps> = ({
           <span className="xs:hidden">Order</span>
         </button>
 
-        {/* Active User & Role Switcher */}
+        {/* Active Authenticated User Profile & Logout */}
         <div className="relative">
           <button
             type="button"
             onClick={() => setShowUserDropdown(!showUserDropdown)}
             className="flex items-center gap-2 p-1 pl-2.5 pr-2 text-xs font-medium text-slate-700 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-lg cursor-pointer"
-            title="Active User & Role Switcher"
+            title="Authenticated Account & Session"
           >
             <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
             <div className="hidden md:block text-left leading-tight">
@@ -249,42 +241,24 @@ export const Header: React.FC<HeaderProps> = ({
           </button>
 
           {showUserDropdown && (
-            <div className="absolute right-0 mt-1.5 w-64 bg-white border border-slate-200 rounded-xl shadow-xl z-50 p-2 text-xs space-y-1">
-              <div className="px-2 py-1.5 border-b border-slate-100">
-                <div className="text-[10px] font-bold uppercase text-slate-400">
-                  Switch Active User Account
+            <div className="absolute right-0 mt-1.5 w-64 bg-white border border-slate-200 rounded-xl shadow-xl z-50 p-3 text-xs space-y-2">
+              <div className="pb-2 border-b border-slate-100">
+                <div className="flex items-center gap-1.5 text-[10px] font-bold uppercase text-emerald-700">
+                  <ShieldCheck className="w-3.5 h-3.5" />
+                  <span>Verified Session</span>
+                </div>
+                <div className="font-bold text-slate-900 mt-1">
+                  {currentUser?.fullName}
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 truncate">
+                  {currentUser?.email || `@${currentUser?.username}`}
+                </div>
+                <div className="mt-1.5 inline-flex items-center px-2 py-0.5 rounded bg-emerald-50 text-emerald-900 border border-emerald-200 text-[10px] font-semibold">
+                  Role: {currentUser ? ROLE_LABELS[currentUser.role].name : 'Super Admin'}
                 </div>
               </div>
-              <div className="max-h-56 overflow-y-auto space-y-0.5">
-                {users
-                  .filter((u) => u.isActive)
-                  .map((u) => (
-                    <button
-                      key={u.id}
-                      type="button"
-                      onClick={() => {
-                        if (onSwitchUser) onSwitchUser(u.id);
-                        setShowUserDropdown(false);
-                      }}
-                      className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-left cursor-pointer ${
-                        currentUser?.id === u.id
-                          ? 'bg-emerald-50 text-emerald-950 font-bold'
-                          : 'hover:bg-slate-50 text-slate-700'
-                      }`}
-                    >
-                      <div className="min-w-0 pr-2">
-                        <div className="truncate">{u.fullName}</div>
-                        <div className="text-[10px] font-mono text-slate-400 truncate">
-                          {u.email || `@${u.username}`}
-                        </div>
-                      </div>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-semibold shrink-0">
-                        {ROLE_LABELS[u.role].name}
-                      </span>
-                    </button>
-                  ))}
-              </div>
-              <div className="pt-1 border-t border-slate-100 space-y-1">
+
+              <div className="space-y-1">
                 {onOpenUserManagement && (
                   <button
                     type="button"
@@ -292,29 +266,43 @@ export const Header: React.FC<HeaderProps> = ({
                       onOpenUserManagement();
                       setShowUserDropdown(false);
                     }}
-                    className="w-full py-1.5 px-2 text-center font-semibold text-emerald-800 hover:bg-emerald-50 rounded-lg flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="w-full py-1.5 px-2.5 text-left font-semibold text-emerald-900 hover:bg-emerald-50 rounded-lg flex items-center gap-2 cursor-pointer"
                   >
-                    <Users className="w-3.5 h-3.5" />
-                    <span>Manage Users & Permissions</span>
+                    <Users className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Users & Role Permissions</span>
                   </button>
                 )}
-                {onLockSession && (
+                {onLogout && (
                   <button
                     type="button"
                     onClick={() => {
-                      onLockSession();
                       setShowUserDropdown(false);
+                      onLogout();
                     }}
-                    className="w-full py-1.5 px-2 text-center font-semibold text-slate-600 hover:bg-red-50 hover:text-red-700 rounded-lg flex items-center justify-center gap-1.5 cursor-pointer"
+                    className="w-full py-1.5 px-2.5 text-left font-semibold text-red-700 hover:bg-red-50 rounded-lg flex items-center gap-2 cursor-pointer"
                   >
                     <LogOut className="w-3.5 h-3.5" />
-                    <span>Sign Out / Lock Session</span>
+                    <span>Log Out of Session</span>
                   </button>
                 )}
               </div>
             </div>
           )}
         </div>
+
+        {/* Direct One-Click Log Out Button */}
+        {onLogout && (
+          <button
+            type="button"
+            onClick={onLogout}
+            data-testid="header-logout-button"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold text-slate-700 hover:text-red-700 bg-slate-100 hover:bg-red-50 border border-slate-200 hover:border-red-200 rounded-lg transition-colors cursor-pointer"
+            title="Log out and end current session"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span className="hidden lg:inline">Log Out</span>
+          </button>
+        )}
       </div>
     </header>
   );

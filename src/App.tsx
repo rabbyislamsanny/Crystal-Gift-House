@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { db } from './db/database';
 import {
   DatabaseState,
@@ -12,6 +12,7 @@ import {
 } from './types/database';
 import { Sidebar, ActiveTab } from './components/Sidebar';
 import { Header } from './components/Header';
+import { LoginPage } from './components/LoginPage';
 import { DashboardView } from './components/DashboardView';
 import { OrdersView } from './components/OrdersView';
 import { AIOrderEntryView } from './components/AIOrderEntryView';
@@ -30,17 +31,37 @@ import { SettingsView } from './components/SettingsView';
 import { AcceptanceTestsModal } from './components/AcceptanceTestsModal';
 import { ConfirmModal } from './components/ConfirmModal';
 import { calculateAvailableStock } from './utils/stockCalculations';
-import { hasPermission } from './utils/authSecurity';
+import { hasPermission, ROLE_LABELS } from './utils/authSecurity';
+import { ShieldAlert, Lock } from 'lucide-react';
+
+const TAB_TO_MODULE: Record<ActiveTab, AppModule> = {
+  dashboard: 'dashboard',
+  ai_order_entry: 'ai_order_entry',
+  orders: 'orders',
+  inventory: 'inventory',
+  purchases: 'purchases',
+  parcels: 'couriers',
+  advertising: 'expenses',
+  expenses: 'expenses',
+  accounting: 'accounting',
+  reports: 'reports',
+  users: 'users',
+  settings: 'settings',
+};
 
 export default function App() {
-  const [dbState, setDbState] = useState<DatabaseState>(() => db.getState());
-  const [currentUser, setCurrentUser] = useState<UserAccount>(() => db.getCurrentUser());
+  // Authentication & Server Session State
+  const [authChecking, setAuthChecking] = useState<boolean>(true);
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [setupRequired, setSetupRequired] = useState<boolean>(false);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
+  const [csrfToken, setCsrfToken] = useState<string>('');
+  const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
+  const [dbState, setDbState] = useState<DatabaseState | null>(null);
+
+  // Navigation & UI State
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [isSessionLocked, setIsSessionLocked] = useState(false);
-  const [loginEmailInput, setLoginEmailInput] = useState('mdrabbyislamsanny1@gmail.com');
-  const [loginPasswordInput, setLoginPasswordInput] = useState('');
-  const [loginError, setLoginError] = useState<string | null>(null);
 
   // Modals state
   const [isNewOrderModalOpen, setIsNewOrderModalOpen] = useState(false);
@@ -62,17 +83,150 @@ export default function App() {
     onConfirm: () => {},
   });
 
-  const refreshState = () => {
-    const updated = db.getState();
-    setDbState(updated);
-    setCurrentUser(db.getCurrentUser());
-    if (selectedOrder) {
-      const refreshedOrder = updated.orders.find((o) => o.id === selectedOrder.id);
-      setSelectedOrder(refreshedOrder || null);
+  const handleUnauthorizedSession = useCallback((notice?: string) => {
+    db.clearClientStorage();
+    setIsAuthenticated(false);
+    setCurrentUser(null);
+    setDbState(null);
+    setCsrfToken('');
+    setSelectedOrder(null);
+    setOrderToPrint(null);
+    setIsNewOrderModalOpen(false);
+    if (notice) {
+      setSessionNotice(notice);
     }
+    if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+      window.history.replaceState(null, '', '/login');
+    }
+  }, []);
+
+  const loadAuthenticatedState = useCallback(
+    async (fallbackUser?: UserAccount, fallbackCsrf?: string) => {
+      try {
+        const res = await fetch('/api/state', {
+          method: 'GET',
+          credentials: 'include',
+        });
+        if (res.status === 401) {
+          handleUnauthorizedSession('Please sign in to access Crystal Gift House Business OS.');
+          return false;
+        }
+        const data = await res.json();
+        if (res.ok && data.success && data.state) {
+          const resolvedUser: UserAccount = data.currentUser || fallbackUser || data.state.users[0];
+          const resolvedCsrf: string = data.csrfToken || fallbackCsrf || '';
+          db.hydrateFromServer(data.state, resolvedUser);
+          setDbState(data.state);
+          setCurrentUser(resolvedUser);
+          setCsrfToken(resolvedCsrf);
+          setIsAuthenticated(true);
+          setSetupRequired(false);
+          if (typeof window !== 'undefined' && window.location.pathname === '/login') {
+            window.history.replaceState(null, '', '/');
+          }
+          return true;
+        }
+      } catch (err) {
+        console.error('Error loading authenticated state:', err);
+      }
+      return false;
+    },
+    [handleUnauthorizedSession]
+  );
+
+  // Verify server session on initial load
+  useEffect(() => {
+    let mounted = true;
+    async function verifySession() {
+      try {
+        const res = await fetch('/api/auth/status', {
+          method: 'GET',
+          credentials: 'include',
+        });
+        const data = await res.json();
+        if (!mounted) return;
+
+        if (data.authenticated && data.user) {
+          await loadAuthenticatedState(data.user, data.csrfToken);
+        } else {
+          db.clearClientStorage();
+          setIsAuthenticated(false);
+          setSetupRequired(Boolean(data.setupRequired));
+          if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
+            window.history.replaceState(null, '', '/login');
+          }
+        }
+      } catch {
+        if (mounted) {
+          db.clearClientStorage();
+          setIsAuthenticated(false);
+        }
+      } finally {
+        if (mounted) {
+          setAuthChecking(false);
+        }
+      }
+    }
+    verifySession();
+    return () => {
+      mounted = false;
+    };
+  }, [loadAuthenticatedState]);
+
+  // Synchronize state changes to protected server database
+  const syncStateToServer = useCallback(
+    async (updatedState: DatabaseState) => {
+      if (!csrfToken) return;
+      try {
+        const res = await fetch('/api/state/sync', {
+          method: 'POST',
+          credentials: 'include',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-csrf-token': csrfToken,
+          },
+          body: JSON.stringify({ state: updatedState }),
+        });
+        if (res.status === 401) {
+          handleUnauthorizedSession(
+            'Your session has expired or access was revoked. Please sign in again.'
+          );
+        }
+      } catch (err) {
+        console.error('Failed to sync state to server:', err);
+      }
+    },
+    [csrfToken, handleUnauthorizedSession]
+  );
+
+  const refreshState = useCallback(
+    (shouldSyncServer: boolean = true) => {
+      const updated = db.getState();
+      setDbState({ ...updated });
+      if (selectedOrder) {
+        const refreshedOrder = updated.orders.find((o) => o.id === selectedOrder.id);
+        setSelectedOrder(refreshedOrder || null);
+      }
+      if (shouldSyncServer) {
+        syncStateToServer(updated);
+      }
+    },
+    [selectedOrder, syncStateToServer]
+  );
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch {
+      // proceed with client cleanup even if network fails
+    }
+    handleUnauthorizedSession('You have been securely logged out.');
   };
 
-  // Handlers
+  // Operational Handlers
   const handleCreateOrder = (orderData: any) => {
     const res = db.createOrder(orderData);
     refreshState();
@@ -88,7 +242,7 @@ export default function App() {
   }) => {
     const res = db.updateOrderStatus({
       ...params,
-      performedBy: currentUser.fullName,
+      performedBy: currentUser?.fullName || 'Admin',
     });
     refreshState();
     return res;
@@ -96,7 +250,11 @@ export default function App() {
 
   const handleBulkUpdateStatus = (orderIds: string[], newStatus: OrderStatus) => {
     for (const id of orderIds) {
-      db.updateOrderStatus({ orderId: id, newStatus, performedBy: currentUser.fullName });
+      db.updateOrderStatus({
+        orderId: id,
+        newStatus,
+        performedBy: currentUser?.fullName || 'Admin',
+      });
     }
     refreshState();
   };
@@ -126,7 +284,10 @@ export default function App() {
   };
 
   const handleAdjustStock = (params: { productId: string; newOnHand: number; reason: string }) => {
-    const res = db.adjustStock({ ...params, performedBy: currentUser.fullName });
+    const res = db.adjustStock({
+      ...params,
+      performedBy: currentUser?.fullName || 'Admin',
+    });
     refreshState();
     return res;
   };
@@ -268,8 +429,8 @@ export default function App() {
     refreshState();
   };
 
-  // User & RBAC Handlers
-  const handleCreateUser = (input: {
+  // Server-Authoritative User & RBAC Handlers
+  const handleCreateUser = async (input: {
     username: string;
     fullName: string;
     email: string;
@@ -277,12 +438,35 @@ export default function App() {
     role: UserRole;
     passwordPlain: string;
   }) => {
-    const res = db.createUser(input);
-    refreshState();
-    return res;
+    try {
+      const res = await fetch('/api/users/create', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken,
+        },
+        body: JSON.stringify(input),
+      });
+      if (res.status === 401) {
+        handleUnauthorizedSession('Session expired. Please log in again.');
+        return { success: false, error: 'Session expired.' };
+      }
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, error: data.error || 'Failed to create user.' };
+      }
+      if (data.state && currentUser) {
+        db.hydrateFromServer(data.state, currentUser);
+        setDbState(data.state);
+      }
+      return { success: true, user: data.user };
+    } catch {
+      return { success: false, error: 'Network error while creating user.' };
+    }
   };
 
-  const handleUpdateUser = (
+  const handleUpdateUser = async (
     userId: string,
     updates: {
       fullName?: string;
@@ -292,49 +476,204 @@ export default function App() {
       isActive?: boolean;
     }
   ) => {
-    const res = db.updateUser(userId, updates);
-    refreshState();
-    return res;
+    try {
+      const res = await fetch('/api/users/update', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken,
+        },
+        body: JSON.stringify({ userId, updates }),
+      });
+      if (res.status === 401) {
+        handleUnauthorizedSession('Session expired. Please log in again.');
+        return { success: false, error: 'Session expired.' };
+      }
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, error: data.error || 'Failed to update user.' };
+      }
+      if (data.state && currentUser) {
+        const updatedSelf =
+          userId === currentUser.id ? data.user || currentUser : currentUser;
+        db.hydrateFromServer(data.state, updatedSelf);
+        setDbState(data.state);
+        setCurrentUser(updatedSelf);
+      }
+      return { success: true, user: data.user };
+    } catch {
+      return { success: false, error: 'Network error while updating user.' };
+    }
   };
 
-  const handleResetPassword = (userId: string, newPasswordPlain: string) => {
-    const res = db.resetUserPassword(userId, newPasswordPlain);
-    refreshState();
-    return res;
+  const handleResetPassword = async (userId: string, newPasswordPlain: string) => {
+    try {
+      const res = await fetch('/api/users/reset-password', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken,
+        },
+        body: JSON.stringify({ userId, newPasswordPlain }),
+      });
+      if (res.status === 401) {
+        handleUnauthorizedSession('Session expired. Please log in again.');
+        return { success: false, error: 'Session expired.' };
+      }
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, error: data.error || 'Password reset failed.' };
+      }
+      if (data.csrfToken) {
+        setCsrfToken(data.csrfToken);
+      }
+      if (data.state && currentUser) {
+        db.hydrateFromServer(data.state, currentUser);
+        setDbState(data.state);
+      }
+      return { success: true };
+    } catch {
+      return { success: false, error: 'Network error while resetting password.' };
+    }
   };
 
-  const handleRevokeAccess = (userId: string, reason?: string) => {
-    const res = db.revokeUserAccess(userId, reason);
-    refreshState();
-    return res;
+  const handleRevokeAccess = async (userId: string, reason?: string) => {
+    try {
+      const res = await fetch('/api/users/revoke', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken,
+        },
+        body: JSON.stringify({ userId, reason }),
+      });
+      if (res.status === 401) {
+        handleUnauthorizedSession('Session expired. Please log in again.');
+        return { success: false, error: 'Session expired.' };
+      }
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, error: data.error || 'Cannot revoke access.' };
+      }
+      if (data.state && currentUser) {
+        db.hydrateFromServer(data.state, currentUser);
+        setDbState(data.state);
+      }
+      return { success: true };
+    } catch {
+      return { success: false, error: 'Network error while revoking access.' };
+    }
   };
 
-  const handleDeleteUser = (userId: string, reason?: string) => {
-    const res = db.deleteUser(userId, reason);
-    refreshState();
-    return res;
+  const handleDeleteUser = async (userId: string, reason?: string) => {
+    try {
+      const res = await fetch('/api/users/delete', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken,
+        },
+        body: JSON.stringify({ userId, reason }),
+      });
+      if (res.status === 401) {
+        handleUnauthorizedSession('Session expired. Please log in again.');
+        return { success: false, error: 'Session expired.' };
+      }
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, error: data.error || 'Cannot delete user.' };
+      }
+      if (data.state && currentUser) {
+        db.hydrateFromServer(data.state, currentUser);
+        setDbState(data.state);
+      }
+      return { success: true };
+    } catch {
+      return { success: false, error: 'Network error while deleting user.' };
+    }
   };
 
-  const handleUpdateRolePermissions = (
+  const handleUpdateRolePermissions = async (
     role: UserRole,
     modulePermissions: Record<AppModule, PermissionAction[]>
   ) => {
-    const res = db.updateRolePermissions(role, modulePermissions);
-    refreshState();
-    return res;
+    try {
+      const res = await fetch('/api/users/role-permissions', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-csrf-token': csrfToken,
+        },
+        body: JSON.stringify({ role, modulePermissions }),
+      });
+      if (res.status === 401) {
+        handleUnauthorizedSession('Session expired. Please log in again.');
+        return { success: false, error: 'Session expired.' };
+      }
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, error: data.error || 'Failed to update role permissions.' };
+      }
+      if (data.state && currentUser) {
+        db.hydrateFromServer(data.state, currentUser);
+        setDbState(data.state);
+      }
+      return { success: true };
+    } catch {
+      return { success: false, error: 'Network error while updating permissions.' };
+    }
   };
 
-  const handleSwitchUser = (userId: string) => {
-    const res = db.setCurrentUser(userId);
-    refreshState();
-    return res;
+  const handleAuthenticateUser = async (username: string, passwordPlain: string) => {
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password: passwordPlain }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        return { success: false, error: data.error || 'Invalid login credentials.' };
+      }
+      await loadAuthenticatedState(data.user, data.csrfToken);
+      return { success: true, user: data.user };
+    } catch {
+      return { success: false, error: 'Network error during authentication.' };
+    }
   };
 
-  const handleAuthenticateUser = (username: string, passwordPlain: string) => {
-    const res = db.authenticateUser(username, passwordPlain);
-    refreshState();
-    return res;
-  };
+  // 1. Loading spinner while verifying session cookie with backend
+  if (authChecking) {
+    return (
+      <div className="min-h-screen bg-emerald-950 flex flex-col items-center justify-center p-4 text-white font-sans">
+        <div className="w-11 h-11 rounded-xl bg-emerald-900 border border-amber-400/40 flex items-center justify-center text-amber-300 mb-3 animate-pulse">
+          <Lock className="w-5 h-5" />
+        </div>
+        <div className="text-sm font-bold tracking-tight">Crystal Gift House Business OS</div>
+        <div className="text-xs text-emerald-300 mt-1">Verifying encrypted session...</div>
+      </div>
+    );
+  }
+
+  // 2. Strict Authentication Gate: Unauthenticated visitors NEVER see any dashboard UI or data
+  if (!isAuthenticated || !dbState || !currentUser) {
+    return (
+      <LoginPage
+        setupRequired={setupRequired}
+        sessionNotice={sessionNotice}
+        onLoginSuccess={({ user, csrfToken: newCsrf }) => {
+          setSessionNotice(null);
+          loadAuthenticatedState(user, newCsrf);
+        }}
+      />
+    );
+  }
 
   // Counts for sidebar badges
   const lowStockCount = dbState.products.filter(
@@ -349,79 +688,13 @@ export default function App() {
     (p) => p.status === 'in_transit' || p.status === 'pending_dispatch'
   ).length;
 
-  if (isSessionLocked) {
-    return (
-      <div className="min-h-screen bg-emerald-950 flex items-center justify-center p-4 font-sans antialiased">
-        <div className="w-full max-w-md bg-white rounded-2xl border border-emerald-800/20 shadow-2xl overflow-hidden">
-          <div className="bg-emerald-900 p-6 text-white border-b border-emerald-800">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-emerald-800 border border-amber-400/40 flex items-center justify-center text-amber-300 font-bold text-lg">
-                CG
-              </div>
-              <div>
-                <h1 className="text-lg font-bold tracking-tight">Crystal Gift House</h1>
-                <p className="text-xs text-emerald-200">Business OS • Secure Multi-User Login</p>
-              </div>
-            </div>
-          </div>
-
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              setLoginError(null);
-              const res = handleAuthenticateUser(loginEmailInput, loginPasswordInput);
-              if (!res.success) {
-                setLoginError(res.error || 'Invalid login credentials.');
-                return;
-              }
-              setIsSessionLocked(false);
-              setLoginPasswordInput('');
-            }}
-            className="p-6 space-y-4 text-xs"
-          >
-            {loginError && (
-              <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-900 font-medium">
-                {loginError}
-              </div>
-            )}
-
-            <div>
-              <label className="block font-bold text-slate-700 mb-1.5">
-                Admin Email or Username
-              </label>
-              <input
-                type="text"
-                required
-                value={loginEmailInput}
-                onChange={(e) => setLoginEmailInput(e.target.value)}
-                placeholder="mdrabbyislamsanny1@gmail.com"
-                className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-slate-900 focus:outline-none focus:border-emerald-600"
-              />
-            </div>
-
-            <div>
-              <label className="block font-bold text-slate-700 mb-1.5">Password</label>
-              <input
-                type="password"
-                required
-                value={loginPasswordInput}
-                onChange={(e) => setLoginPasswordInput(e.target.value)}
-                placeholder="Enter your password"
-                className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-xl font-mono text-slate-900 focus:outline-none focus:border-emerald-600"
-              />
-            </div>
-
-            <button
-              type="submit"
-              className="w-full py-2.5 px-4 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl shadow-xs transition-colors cursor-pointer"
-            >
-              Sign In to Dashboard
-            </button>
-          </form>
-        </div>
-      </div>
-    );
-  }
+  const currentModule = TAB_TO_MODULE[activeTab];
+  const canViewActiveTab = hasPermission(
+    currentUser,
+    dbState.rolePermissions,
+    currentModule,
+    'view'
+  );
 
   return (
     <div className="flex h-screen overflow-hidden bg-slate-50 text-slate-900 font-sans antialiased selection:bg-emerald-600 selection:text-white">
@@ -437,6 +710,7 @@ export default function App() {
         onOpenAcceptanceTests={() => setIsAcceptanceModalOpen(true)}
         currentUser={currentUser}
         rolePermissions={dbState.rolePermissions}
+        onLogout={handleLogout}
       />
 
       {/* Main View Area */}
@@ -445,10 +719,18 @@ export default function App() {
         <Header
           onToggleMobileMenu={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
           onOpenNewOrder={() => setIsNewOrderModalOpen(true)}
-          onOpenAIOrderEntry={() => setActiveTab('ai_order_entry')}
+          onOpenAIOrderEntry={
+            hasPermission(currentUser, dbState.rolePermissions, 'ai_order_entry', 'view')
+              ? () => setActiveTab('ai_order_entry')
+              : undefined
+          }
           onOpenAcceptanceTests={() => setIsAcceptanceModalOpen(true)}
           onOpenSettings={() => setActiveTab('settings')}
-          onOpenUserManagement={() => setActiveTab('users')}
+          onOpenUserManagement={
+            hasPermission(currentUser, dbState.rolePermissions, 'users', 'view')
+              ? () => setActiveTab('users')
+              : undefined
+          }
           onSelectOrder={(ord) => setSelectedOrder(ord)}
           onSelectProduct={() => setActiveTab('inventory')}
           products={dbState.products}
@@ -456,177 +738,197 @@ export default function App() {
           parcels={dbState.parcels}
           dateRangeLabel="This Month (Oct 2026)"
           currentUser={currentUser}
-          users={dbState.users}
-          onSwitchUser={(uid) => handleSwitchUser(uid)}
-          onLockSession={() => {
-            setLoginEmailInput(currentUser.email || currentUser.username);
-            setLoginPasswordInput('');
-            setLoginError(null);
-            setIsSessionLocked(true);
-          }}
+          onLogout={handleLogout}
         />
 
         {/* Content Body */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-6">
-          {activeTab === 'dashboard' && (
-            <DashboardView
-              orders={dbState.orders}
-              products={dbState.products}
-              parcels={dbState.parcels}
-              adExpenses={dbState.adExpenses}
-              operatingExpenses={dbState.operatingExpenses}
-              bankAccounts={dbState.bankAccounts}
-              onOpenNewOrder={() => setIsNewOrderModalOpen(true)}
-              onOpenAddProduct={() => setActiveTab('inventory')}
-              onOpenLogAdSpend={() => setActiveTab('advertising')}
-              onOpenAcceptanceTests={() => setIsAcceptanceModalOpen(true)}
-              onNavigateTab={(tab) => setActiveTab(tab)}
-              onSelectOrder={(ord) => setSelectedOrder(ord)}
-              onSelectProduct={() => setActiveTab('inventory')}
-            />
-          )}
-
-          {activeTab === 'ai_order_entry' && (
-            <AIOrderEntryView
-              products={dbState.products}
-              existingOrders={dbState.orders}
-              settings={dbState.settings}
-              currentUser={currentUser}
-              rolePermissions={dbState.rolePermissions}
-              onCreateOrder={handleCreateOrder}
-              onSelectOrder={(ord) => setSelectedOrder(ord)}
-            />
-          )}
-
-          {activeTab === 'orders' && (
-            <OrdersView
-              orders={dbState.orders}
-              users={dbState.users}
-              onOpenNewOrder={() => setIsNewOrderModalOpen(true)}
-              onOpenAIOrderEntry={() => setActiveTab('ai_order_entry')}
-              onSelectOrder={(ord) => setSelectedOrder(ord)}
-              onDeleteOrder={handleDeleteOrder}
-              onBulkUpdateStatus={handleBulkUpdateStatus}
-              canDeleteOrders={hasPermission(
-                currentUser,
-                dbState.rolePermissions,
-                'orders',
-                'delete'
+          {!canViewActiveTab ? (
+            <div className="max-w-lg mx-auto my-12 bg-white rounded-2xl border border-red-200 p-6 text-center space-y-3 shadow-xs">
+              <div className="w-12 h-12 rounded-xl bg-red-50 border border-red-200 flex items-center justify-center text-red-600 mx-auto">
+                <ShieldAlert className="w-6 h-6" />
+              </div>
+              <h2 className="text-base font-bold text-slate-900">
+                Access Restricted by Role Policy
+              </h2>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Your current account (<strong>{currentUser.fullName}</strong> •{' '}
+                <span className="font-semibold text-emerald-800">
+                  {ROLE_LABELS[currentUser.role].name}
+                </span>
+                ) does not have permission to view the <strong>{activeTab}</strong> module.
+              </p>
+              <button
+                type="button"
+                onClick={() => setActiveTab('dashboard')}
+                className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold rounded-xl cursor-pointer"
+              >
+                Return to Dashboard
+              </button>
+            </div>
+          ) : (
+            <>
+              {activeTab === 'dashboard' && (
+                <DashboardView
+                  orders={dbState.orders}
+                  products={dbState.products}
+                  parcels={dbState.parcels}
+                  adExpenses={dbState.adExpenses}
+                  operatingExpenses={dbState.operatingExpenses}
+                  bankAccounts={dbState.bankAccounts}
+                  onOpenNewOrder={() => setIsNewOrderModalOpen(true)}
+                  onOpenAddProduct={() => setActiveTab('inventory')}
+                  onOpenLogAdSpend={() => setActiveTab('advertising')}
+                  onOpenAcceptanceTests={() => setIsAcceptanceModalOpen(true)}
+                  onNavigateTab={(tab) => setActiveTab(tab)}
+                  onSelectOrder={(ord) => setSelectedOrder(ord)}
+                  onSelectProduct={() => setActiveTab('inventory')}
+                />
               )}
-              canExportOrders={hasPermission(
-                currentUser,
-                dbState.rolePermissions,
-                'orders',
-                'export'
+
+              {activeTab === 'ai_order_entry' && (
+                <AIOrderEntryView
+                  products={dbState.products}
+                  existingOrders={dbState.orders}
+                  settings={dbState.settings}
+                  currentUser={currentUser}
+                  rolePermissions={dbState.rolePermissions}
+                  csrfToken={csrfToken}
+                  onCreateOrder={handleCreateOrder}
+                  onSelectOrder={(ord) => setSelectedOrder(ord)}
+                />
               )}
-            />
-          )}
 
-          {activeTab === 'inventory' && (
-            <InventoryView
-              products={dbState.products}
-              stockMovements={dbState.stockMovements}
-              suppliers={dbState.suppliers}
-              onSaveProduct={handleSaveProduct}
-              onDeleteProduct={handleDeleteProduct}
-              onAdjustStock={handleAdjustStock}
-            />
-          )}
+              {activeTab === 'orders' && (
+                <OrdersView
+                  orders={dbState.orders}
+                  users={dbState.users}
+                  onOpenNewOrder={() => setIsNewOrderModalOpen(true)}
+                  onOpenAIOrderEntry={() => setActiveTab('ai_order_entry')}
+                  onSelectOrder={(ord) => setSelectedOrder(ord)}
+                  onDeleteOrder={handleDeleteOrder}
+                  onBulkUpdateStatus={handleBulkUpdateStatus}
+                  canDeleteOrders={hasPermission(
+                    currentUser,
+                    dbState.rolePermissions,
+                    'orders',
+                    'delete'
+                  )}
+                  canExportOrders={hasPermission(
+                    currentUser,
+                    dbState.rolePermissions,
+                    'orders',
+                    'export'
+                  )}
+                />
+              )}
 
-          {activeTab === 'purchases' && (
-            <PurchasesView
-              purchases={dbState.purchaseOrders}
-              suppliers={dbState.suppliers}
-              products={dbState.products}
-              bankAccounts={dbState.bankAccounts}
-              onCreatePO={handleCreatePO}
-              onDeletePO={handleDeletePO}
-              onReceiveGoods={handleReceiveGoods}
-              onSaveSupplier={handleSaveSupplier}
-              onDeleteSupplier={handleDeleteSupplier}
-              onRecordSupplierPayment={handleRecordSupplierPayment}
-            />
-          )}
+              {activeTab === 'inventory' && (
+                <InventoryView
+                  products={dbState.products}
+                  stockMovements={dbState.stockMovements}
+                  suppliers={dbState.suppliers}
+                  onSaveProduct={handleSaveProduct}
+                  onDeleteProduct={handleDeleteProduct}
+                  onAdjustStock={handleAdjustStock}
+                />
+              )}
 
-          {activeTab === 'parcels' && (
-            <ParcelsView
-              parcels={dbState.parcels}
-              bankAccounts={dbState.bankAccounts}
-              onSettleParcels={handleSettleParcels}
-              onUpdateParcelStatus={() => {}}
-            />
-          )}
+              {activeTab === 'purchases' && (
+                <PurchasesView
+                  purchases={dbState.purchaseOrders}
+                  suppliers={dbState.suppliers}
+                  products={dbState.products}
+                  bankAccounts={dbState.bankAccounts}
+                  onCreatePO={handleCreatePO}
+                  onDeletePO={handleDeletePO}
+                  onReceiveGoods={handleReceiveGoods}
+                  onSaveSupplier={handleSaveSupplier}
+                  onDeleteSupplier={handleDeleteSupplier}
+                  onRecordSupplierPayment={handleRecordSupplierPayment}
+                />
+              )}
 
-          {activeTab === 'advertising' && (
-            <AdvertisingView
-              adExpenses={dbState.adExpenses}
-              defaultExchangeRate={dbState.settings.defaultExchangeRate}
-              onSaveAdExpense={handleSaveAdExpense}
-              onDeleteAdExpense={handleDeleteAdExpense}
-            />
-          )}
+              {activeTab === 'parcels' && (
+                <ParcelsView
+                  parcels={dbState.parcels}
+                  bankAccounts={dbState.bankAccounts}
+                  onSettleParcels={handleSettleParcels}
+                  onUpdateParcelStatus={() => {}}
+                />
+              )}
 
-          {activeTab === 'expenses' && (
-            <ExpensesView
-              expenses={dbState.operatingExpenses}
-              onSaveExpense={handleSaveOperatingExpense}
-              onDeleteExpense={handleDeleteOperatingExpense}
-            />
-          )}
+              {activeTab === 'advertising' && (
+                <AdvertisingView
+                  adExpenses={dbState.adExpenses}
+                  defaultExchangeRate={dbState.settings.defaultExchangeRate}
+                  onSaveAdExpense={handleSaveAdExpense}
+                  onDeleteAdExpense={handleDeleteAdExpense}
+                />
+              )}
 
-          {activeTab === 'accounting' && (
-            <AccountingView
-              orders={dbState.orders}
-              parcels={dbState.parcels}
-              adExpenses={dbState.adExpenses}
-              operatingExpenses={dbState.operatingExpenses}
-              bankAccounts={dbState.bankAccounts}
-              cashTransactions={dbState.cashTransactions}
-              suppliers={dbState.suppliers}
-              products={dbState.products}
-              onSaveCashTransaction={handleSaveCashTransaction}
-              onDeleteCashTransaction={handleDeleteCashTransaction}
-              onSaveBankAccount={handleSaveBankAccount}
-              onDeleteBankAccount={handleDeleteBankAccount}
-            />
-          )}
+              {activeTab === 'expenses' && (
+                <ExpensesView
+                  expenses={dbState.operatingExpenses}
+                  onSaveExpense={handleSaveOperatingExpense}
+                  onDeleteExpense={handleDeleteOperatingExpense}
+                />
+              )}
 
-          {activeTab === 'reports' && (
-            <ReportsView
-              orders={dbState.orders}
-              products={dbState.products}
-              parcels={dbState.parcels}
-              adExpenses={dbState.adExpenses}
-              operatingExpenses={dbState.operatingExpenses}
-            />
-          )}
+              {activeTab === 'accounting' && (
+                <AccountingView
+                  orders={dbState.orders}
+                  parcels={dbState.parcels}
+                  adExpenses={dbState.adExpenses}
+                  operatingExpenses={dbState.operatingExpenses}
+                  bankAccounts={dbState.bankAccounts}
+                  cashTransactions={dbState.cashTransactions}
+                  suppliers={dbState.suppliers}
+                  products={dbState.products}
+                  onSaveCashTransaction={handleSaveCashTransaction}
+                  onDeleteCashTransaction={handleDeleteCashTransaction}
+                  onSaveBankAccount={handleSaveBankAccount}
+                  onDeleteBankAccount={handleDeleteBankAccount}
+                />
+              )}
 
-          {activeTab === 'users' && (
-            <UserManagementView
-              users={dbState.users}
-              currentUser={currentUser}
-              rolePermissions={dbState.rolePermissions}
-              auditLogs={dbState.auditLogs}
-              onCreateUser={handleCreateUser}
-              onUpdateUser={handleUpdateUser}
-              onResetPassword={handleResetPassword}
-              onRevokeAccess={handleRevokeAccess}
-              onDeleteUser={handleDeleteUser}
-              onUpdateRolePermissions={handleUpdateRolePermissions}
-              onSwitchUser={handleSwitchUser}
-              onAuthenticateUser={handleAuthenticateUser}
-            />
-          )}
+              {activeTab === 'reports' && (
+                <ReportsView
+                  orders={dbState.orders}
+                  products={dbState.products}
+                  parcels={dbState.parcels}
+                  adExpenses={dbState.adExpenses}
+                  operatingExpenses={dbState.operatingExpenses}
+                />
+              )}
 
-          {activeTab === 'settings' && (
-            <SettingsView
-              settings={dbState.settings}
-              auditLogs={dbState.auditLogs}
-              onUpdateSettings={handleUpdateSettings}
-              onExportBackup={handleExportBackup}
-              onRestoreBackup={handleRestoreBackup}
-              onResetToDemo={handleResetToDemo}
-            />
+              {activeTab === 'users' && (
+                <UserManagementView
+                  users={dbState.users}
+                  currentUser={currentUser}
+                  rolePermissions={dbState.rolePermissions}
+                  auditLogs={dbState.auditLogs}
+                  onCreateUser={handleCreateUser}
+                  onUpdateUser={handleUpdateUser}
+                  onResetPassword={handleResetPassword}
+                  onRevokeAccess={handleRevokeAccess}
+                  onDeleteUser={handleDeleteUser}
+                  onUpdateRolePermissions={handleUpdateRolePermissions}
+                  onAuthenticateUser={handleAuthenticateUser}
+                />
+              )}
+
+              {activeTab === 'settings' && (
+                <SettingsView
+                  settings={dbState.settings}
+                  auditLogs={dbState.auditLogs}
+                  onUpdateSettings={handleUpdateSettings}
+                  onExportBackup={handleExportBackup}
+                  onRestoreBackup={handleRestoreBackup}
+                  onResetToDemo={handleResetToDemo}
+                />
+              )}
+            </>
           )}
         </main>
       </div>
