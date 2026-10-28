@@ -73,8 +73,16 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [dbState, setDbState] = useState<DatabaseState | null>(null);
 
-  // Navigation & UI State
-  const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
+  // Navigation & UI State — default to 'inventory' so Products & Stock is immediately accessible
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
+    if (typeof window !== 'undefined') {
+      const cleanPath = window.location.pathname.replace(/^\/+|\/+$/g, '').toLowerCase();
+      if (cleanPath && cleanPath in TAB_TO_MODULE) {
+        return cleanPath as ActiveTab;
+      }
+    }
+    return 'inventory';
+  });
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   // Modals state
@@ -97,22 +105,29 @@ export default function App() {
     onConfirm: () => {},
   });
 
-  const handleUnauthorizedSession = useCallback((notice?: string) => {
-    clearActiveSessionTokens();
-    setIsAuthenticated(false);
-    setCurrentUser(null);
-    setDbState(null);
-    setCsrfToken('');
-    setSelectedOrder(null);
-    setOrderToPrint(null);
-    setIsNewOrderModalOpen(false);
-    if (notice) {
-      setSessionNotice(notice);
-    }
-    if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-      window.history.replaceState(null, '', '/login');
+  const normalizeBrowserRootUrl = useCallback(() => {
+    if (typeof window !== 'undefined' && window.location.pathname !== '/') {
+      window.history.replaceState(null, '', '/');
     }
   }, []);
+
+  const handleUnauthorizedSession = useCallback(
+    (notice?: string) => {
+      clearActiveSessionTokens();
+      setIsAuthenticated(false);
+      setCurrentUser(null);
+      setDbState(null);
+      setCsrfToken('');
+      setSelectedOrder(null);
+      setOrderToPrint(null);
+      setIsNewOrderModalOpen(false);
+      if (notice) {
+        setSessionNotice(notice);
+      }
+      normalizeBrowserRootUrl();
+    },
+    [normalizeBrowserRootUrl]
+  );
 
   const loadAuthenticatedState = useCallback(
     async (fallbackUser?: UserAccount, fallbackCsrf?: string) => {
@@ -131,16 +146,14 @@ export default function App() {
         setCsrfToken(resolvedCsrf);
         setIsAuthenticated(true);
         setSetupRequired(false);
-        if (typeof window !== 'undefined' && window.location.pathname === '/login') {
-          window.history.replaceState(null, '', '/');
-        }
+        normalizeBrowserRootUrl();
         return true;
       } catch (err) {
         console.error('Error loading authenticated state:', err);
       }
       return false;
     },
-    [handleUnauthorizedSession]
+    [handleUnauthorizedSession, normalizeBrowserRootUrl]
   );
 
   // Verify server session on initial load
@@ -159,9 +172,7 @@ export default function App() {
             setCsrfToken(status.csrfToken || '');
             setIsAuthenticated(true);
             setSetupRequired(false);
-            if (typeof window !== 'undefined' && window.location.pathname === '/login') {
-              window.history.replaceState(null, '', '/');
-            }
+            normalizeBrowserRootUrl();
           } else {
             await loadAuthenticatedState(status.user, status.csrfToken);
           }
@@ -169,14 +180,13 @@ export default function App() {
           clearActiveSessionTokens();
           setIsAuthenticated(false);
           setSetupRequired(Boolean(status.setupRequired));
-          if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
-            window.history.replaceState(null, '', '/login');
-          }
+          normalizeBrowserRootUrl();
         }
       } catch {
         if (mounted) {
           clearActiveSessionTokens();
           setIsAuthenticated(false);
+          normalizeBrowserRootUrl();
         }
       } finally {
         if (mounted) {
@@ -188,7 +198,7 @@ export default function App() {
     return () => {
       mounted = false;
     };
-  }, [loadAuthenticatedState]);
+  }, [loadAuthenticatedState, normalizeBrowserRootUrl]);
 
   // Synchronize state changes to protected server database
   const syncStateToServer = useCallback(
