@@ -90,7 +90,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sellingPrice: 1850,
     openingStock: 30,
     currentStock: 25,
-    reservedStock: 2,
+    reservedStock: 0,
     lowStockThreshold: 5,
     packagingCost: 45,
     damagedStock: 0,
@@ -130,7 +130,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sellingPrice: 1250,
     openingStock: 40,
     currentStock: 32,
-    reservedStock: 3,
+    reservedStock: 0,
     lowStockThreshold: 8,
     packagingCost: 35,
     damagedStock: 1,
@@ -170,7 +170,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sellingPrice: 2800,
     openingStock: 10,
     currentStock: 4,
-    reservedStock: 1,
+    reservedStock: 0,
     lowStockThreshold: 4,
     packagingCost: 80,
     damagedStock: 0,
@@ -634,6 +634,29 @@ class DatabaseService {
 
   constructor() {
     this.state = this.loadFromStorage();
+    this.reconcileReservedStock();
+  }
+
+  private reconcileReservedStock(): void {
+    const reservedMap: Record<string, number> = {};
+    for (const ord of this.state.orders) {
+      if (['confirmed', 'processing', 'packed'].includes(ord.status)) {
+        for (const it of ord.items) {
+          reservedMap[it.productId] = (reservedMap[it.productId] || 0) + it.quantity;
+        }
+      }
+    }
+    let changed = false;
+    for (const prod of this.state.products) {
+      const actualReserved = reservedMap[prod.id] || 0;
+      if (prod.reservedStock !== actualReserved) {
+        prod.reservedStock = actualReserved;
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.saveToStorage();
+    }
   }
 
   private getStorageItem(key: string): string | null {
@@ -823,12 +846,6 @@ class DatabaseService {
   } {
     const prod = this.state.products.find((p) => p.id === productId);
     if (!prod) return { success: false, error: 'Product not found' };
-    if (prod.reservedStock > 0) {
-      return {
-        success: false,
-        error: `Cannot delete "${prod.name}": ${prod.reservedStock} units are currently reserved for open orders. Cancel or complete the open orders first.`,
-      };
-    }
 
     const referencedOrders = this.state.orders.filter((o) => o.items.some((it) => it.productId === productId));
     if (options?.archiveOnlyIfReferenced && referencedOrders.length > 0) {
@@ -842,6 +859,24 @@ class DatabaseService {
       );
       this.saveToStorage();
       return { success: true, archivedInstead: true };
+    }
+
+    if (prod.reservedStock > 0) {
+      const prevReservedVal = prod.reservedStock;
+      prod.reservedStock = 0;
+      this.recordStockMovement({
+        productId: prod.id,
+        productName: prod.name,
+        movementType: 'reservation_release',
+        quantity: prevReservedVal,
+        previousOnHand: prod.currentStock,
+        newOnHand: prod.currentStock,
+        previousReserved: prevReservedVal,
+        newReserved: 0,
+        reason: `Product "${prod.name}" deleted by Admin. Released ${prevReservedVal} reserved unit(s).`,
+        referenceId: prod.id,
+        performedBy: 'Admin',
+      });
     }
 
     const consequence =
