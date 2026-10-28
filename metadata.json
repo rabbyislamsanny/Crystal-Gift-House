@@ -1,0 +1,7 @@
+{
+  "name": "Crystal Gift House Business OS",
+  "description": "Production-ready, database-backed business management and inventory OS for Crystal Gift House Bangladesh. Tracks orders, stock valuation, parcels, ad spend, and accounting in BDT.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
