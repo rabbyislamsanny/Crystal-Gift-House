@@ -379,16 +379,63 @@ test('Multi-Browser Scenarios (A)-(F): Central server database consistency acros
     const reloginData = await reloginRes.json();
     assert.equal(reloginData.success, true);
 
+    const reloginHeaders = {
+      'Content-Type': 'application/json',
+      'x-session-token': reloginData.sessionToken,
+      'x-csrf-token': reloginData.csrfToken,
+    };
+
     const reloginState = await (
       await fetch(`${srv.baseUrl}/api/state`, {
-        headers: {
-          'x-session-token': reloginData.sessionToken,
-          'x-csrf-token': reloginData.csrfToken,
-        },
+        headers: reloginHeaders,
       })
     ).json();
     assert.equal(reloginState.state.products.length, 6);
     assert.equal(reloginState.state.orders.length, 4);
+
+    // (G) Fresh Inventory reset in Window A and verify 0 products in Window B, then add/update and verify identical state
+    const freshRes = await fetch(`${srv.baseUrl}/api/inventory/fresh`, {
+      method: 'POST',
+      headers: reloginHeaders,
+    });
+    assert.equal(freshRes.status, 200);
+    const freshData = await freshRes.json();
+    assert.equal(freshData.success, true);
+    assert.equal(freshData.state.products.length, 0);
+    assert.equal(freshData.state.stockMovements.length, 0);
+
+    const viewBAfterFresh = await (
+      await fetch(`${srv.baseUrl}/api/state`, { headers: headersB })
+    ).json();
+    assert.equal(viewBAfterFresh.state.products.length, 0);
+    assert.equal(viewBAfterFresh.state.stockMovements.length, 0);
+
+    // Add a new item to the fresh inventory in Window A and confirm Window B sees the exact same result
+    await fetch(`${srv.baseUrl}/api/db/mutate`, {
+      method: 'POST',
+      headers: reloginHeaders,
+      body: JSON.stringify({
+        action: 'saveProduct',
+        payload: {
+          id: 'prod-fresh-1',
+          sku: 'CGH-FRESH-01',
+          name: 'Fresh Inventory Crystal Moon Lamp',
+          purchaseCost: 600,
+          sellingPrice: 1350,
+          openingStock: 25,
+          currentStock: 25,
+          lowStockThreshold: 5,
+        },
+      }),
+    });
+
+    const finalA = await (await fetch(`${srv.baseUrl}/api/state`, { headers: reloginHeaders })).json();
+    const finalB = await (await fetch(`${srv.baseUrl}/api/state`, { headers: headersB })).json();
+    assert.equal(finalA.state.products.length, 1);
+    assert.equal(finalB.state.products.length, 1);
+    assert.equal(finalB.state.products[0].name, 'Fresh Inventory Crystal Moon Lamp');
+    assert.equal(finalB.state.products[0].currentStock, 25);
+    assert.equal(computeStateSignature(finalA.state), computeStateSignature(finalB.state));
   } finally {
     await srv.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });

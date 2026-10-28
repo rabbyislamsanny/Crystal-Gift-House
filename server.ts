@@ -99,35 +99,63 @@ export function createApp(options?: CreateAppOptions) {
     }
   }
 
+  const sseClients = new Set<Response>();
+
+  function broadcastSseUpdate(): void {
+    if (sseClients.size === 0) return;
+    try {
+      const payload = JSON.stringify({
+        type: 'state_updated',
+        revision: stateRevision,
+        lastUpdatedAt,
+        signature: computeStateSignature(serverDb.getState()),
+      });
+      const message = `data: ${payload}\n\n`;
+      for (const client of sseClients) {
+        try {
+          client.write(message);
+        } catch {
+          sseClients.delete(client);
+        }
+      }
+    } catch {
+      // ignore SSE broadcast errors
+    }
+  }
+
   function persistServerState(bumpRevision: boolean = true): void {
     if (bumpRevision) {
       stateRevision += 1;
       lastUpdatedAt = new Date().toISOString();
     }
-    if (!persistFilePath) return;
-    try {
-      const dir = path.dirname(persistFilePath);
-      if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-      }
-      // Keep a safe backup of the previous valid state before overwriting
-      if (fs.existsSync(persistFilePath)) {
-        try {
-          fs.copyFileSync(persistFilePath, `${persistFilePath}.backup`);
-        } catch {
-          // ignore backup copy warning
+    if (persistFilePath) {
+      try {
+        const dir = path.dirname(persistFilePath);
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
         }
+        // Keep a safe backup of the previous valid state before overwriting
+        if (fs.existsSync(persistFilePath)) {
+          try {
+            fs.copyFileSync(persistFilePath, `${persistFilePath}.backup`);
+          } catch {
+            // ignore backup copy warning
+          }
+        }
+        const payloadToSave = {
+          ...serverDb.getState(),
+          _metaRevision: stateRevision,
+          _metaUpdatedAt: lastUpdatedAt,
+        };
+        const tmpPath = `${persistFilePath}.tmp`;
+        fs.writeFileSync(tmpPath, JSON.stringify(payloadToSave), 'utf-8');
+        fs.renameSync(tmpPath, persistFilePath);
+      } catch (err) {
+        console.error('Failed to persist server state:', err);
       }
-      const payloadToSave = {
-        ...serverDb.getState(),
-        _metaRevision: stateRevision,
-        _metaUpdatedAt: lastUpdatedAt,
-      };
-      const tmpPath = `${persistFilePath}.tmp`;
-      fs.writeFileSync(tmpPath, JSON.stringify(payloadToSave), 'utf-8');
-      fs.renameSync(tmpPath, persistFilePath);
-    } catch (err) {
-      console.error('Failed to persist server state:', err);
+    }
+    if (bumpRevision) {
+      broadcastSseUpdate();
     }
   }
 
@@ -220,6 +248,10 @@ export function createApp(options?: CreateAppOptions) {
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const bearer = authHeader.slice(7).trim();
       if (bearer) return bearer;
+    }
+    const queryToken = typeof req.query?.token === 'string' ? req.query.token.trim() : '';
+    if (queryToken) {
+      return queryToken;
     }
     const cookies = parseCookies(req.headers.cookie);
     if (cookies[SESSION_COOKIE_NAME]) {
@@ -461,6 +493,28 @@ export function createApp(options?: CreateAppOptions) {
   // PROTECTED PRIVATE ROUTES (Require valid HttpOnly session + CSRF on writes)
   // ---------------------------------------------------------------------------
 
+  // Real-time Server-Sent Events (SSE) stream so every tab & window updates immediately
+  app.get('/api/state/stream', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    const currentState = serverDb.getState();
+    const initialPayload = JSON.stringify({
+      type: 'connected',
+      revision: stateRevision,
+      lastUpdatedAt,
+      signature: computeStateSignature(currentState),
+    });
+    res.write(`data: ${initialPayload}\n\n`);
+
+    sseClients.add(res);
+    req.on('close', () => {
+      sseClients.delete(res);
+    });
+  });
+
   // Lightweight state version & signature endpoint for real-time cross-browser sync
   app.get('/api/state/version', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     const currentState = serverDb.getState();
@@ -527,13 +581,14 @@ export function createApp(options?: CreateAppOptions) {
     const explicitDeletedIds = Array.isArray(req.body?.deletedIds)
       ? (req.body.deletedIds as string[])
       : undefined;
+    const forceAuthoritative = Boolean(req.body?.forceAuthoritative);
 
-    // If client's baseRevision is older than the server's current stateRevision,
-    // another browser/tab has updated the central database in the meantime:
-    // use 'safe_merge' so concurrent additions in the other browser are preserved,
-    // while still honoring explicit deletions in `deletedIds` or `trash`.
+    // If forceAuthoritative is true, the active tab's state is applied directly as authoritative_client.
+    // Otherwise, if clientBaseRevision is older than stateRevision, use 'safe_merge' so concurrent additions are preserved.
     const isClientStale =
-      clientBaseRevision !== undefined && clientBaseRevision < stateRevision;
+      !forceAuthoritative &&
+      clientBaseRevision !== undefined &&
+      clientBaseRevision < stateRevision;
     const mergeMode = isClientStale ? 'safe_merge' : 'authoritative_client';
 
     const currentServerState = serverDb.getState();
@@ -548,6 +603,24 @@ export function createApp(options?: CreateAppOptions) {
     const sanitized = serverDb.getSanitizedStateForClient();
     res.json({
       success: true,
+      state: sanitized,
+      revision: stateRevision,
+      lastUpdatedAt,
+      signature: computeStateSignature(sanitized),
+    });
+  });
+
+  // Dedicated endpoint to reset inventory to a clean Fresh Inventory across all tabs/windows
+  app.post('/api/inventory/fresh', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const actor = req.authUser!;
+    const result = serverDb.resetInventory({
+      performedBy: actor.fullName || 'Super Admin',
+    });
+    persistServerState(true);
+    const sanitized = serverDb.getSanitizedStateForClient();
+    res.json({
+      success: true,
+      result,
       state: sanitized,
       revision: stateRevision,
       lastUpdatedAt,
@@ -573,6 +646,11 @@ export function createApp(options?: CreateAppOptions) {
           break;
         case 'deleteProduct':
           result = serverDb.deleteProduct(payload?.productId, payload?.options);
+          break;
+        case 'resetInventory':
+          result = serverDb.resetInventory({
+            performedBy: payload?.performedBy || actor.fullName || 'Super Admin',
+          });
           break;
         case 'adjustStock':
           result = serverDb.adjustStock({

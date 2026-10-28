@@ -343,10 +343,10 @@ export default function App() {
       document.addEventListener('visibilitychange', handleVisibilityChange);
     }
 
-    // 4. Periodic 2-second version check for instant multi-browser / multi-device consistency
+    // 4. Periodic 1-second version check for guaranteed multi-browser / multi-device consistency
     const intervalId = setInterval(() => {
       pullLatestFromCentralServer(false);
-    }, 2000);
+    }, 1000);
 
     return () => {
       cancelled = true;
@@ -434,6 +434,14 @@ export default function App() {
   const handleDeleteProduct = (productId: string) => {
     const res = db.deleteProduct(productId);
     refreshState(true, [productId]);
+    return res;
+  };
+
+  const handleResetInventory = () => {
+    const res = db.resetInventory({
+      performedBy: currentUser?.fullName || 'Super Admin',
+    });
+    refreshState(true, res.deletedIds);
     return res;
   };
 
@@ -909,6 +917,7 @@ export default function App() {
                   onSaveProduct={handleSaveProduct}
                   onDeleteProduct={handleDeleteProduct}
                   onAdjustStock={handleAdjustStock}
+                  onResetInventory={handleResetInventory}
                 />
               )}
 

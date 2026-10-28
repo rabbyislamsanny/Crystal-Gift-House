@@ -13,12 +13,10 @@ import {
 } from './authSecurity';
 import {
   computeStateSignature,
-  findUnsyncedLocalRecords,
 } from './stateSync';
 
 const ACTIVE_SESSION_STORAGE_KEY = 'cgh_active_session_v1';
 const LOCAL_SESSION_STORE_KEY = 'cgh_local_session_record_v1';
-const LOCAL_RECONCILED_FLAG_KEY = 'cgh_server_reconciled_v1';
 export const SYNC_BROADCAST_CHANNEL_NAME = 'cgh_business_os_sync_v1';
 export const SYNC_STORAGE_PING_KEY = 'cgh_last_sync_ping_v1';
 
@@ -366,6 +364,9 @@ export async function loginWithAuthServer(
         res.data.csrfToken,
         res.data.expiresAt
       );
+      if (typeof res.data.revision === 'number') {
+        updateLastKnownSyncMeta(res.data.revision);
+      }
       return {
         success: true,
         user: res.data.user,
@@ -489,56 +490,6 @@ export async function setupSuperAdminWithAuthServer(input: {
   };
 }
 
-async function reconcileLocalStateIfNeeded(
-  serverState: DatabaseState,
-  csrfToken?: string
-): Promise<DatabaseState> {
-  try {
-    if (typeof localStorage !== 'undefined' && localStorage.getItem(LOCAL_RECONCILED_FLAG_KEY) === '1') {
-      return serverState;
-    }
-    const rawLocal = db.getRawSavedLocalState();
-    if (!rawLocal) {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(LOCAL_RECONCILED_FLAG_KEY, '1');
-      }
-      return serverState;
-    }
-    const check = findUnsyncedLocalRecords(rawLocal, serverState);
-    if (!check.hasUnsynced) {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(LOCAL_RECONCILED_FLAG_KEY, '1');
-      }
-      return serverState;
-    }
-
-    const reconcileRes = await safeApiFetch(
-      '/api/state/reconcile',
-      {
-        method: 'POST',
-        body: JSON.stringify({ state: rawLocal }),
-      },
-      csrfToken
-    );
-
-    if (reconcileRes.reachable && reconcileRes.ok && reconcileRes.data?.state) {
-      if (typeof localStorage !== 'undefined') {
-        localStorage.setItem(LOCAL_RECONCILED_FLAG_KEY, '1');
-      }
-      updateLastKnownSyncMeta(
-        reconcileRes.data.revision,
-        reconcileRes.data.signature,
-        reconcileRes.data.state
-      );
-      broadcastStateSyncEvent('state_updated', reconcileRes.data.revision);
-      return reconcileRes.data.state as DatabaseState;
-    }
-  } catch {
-    // ignore reconciliation errors and preserve serverState
-  }
-  return serverState;
-}
-
 export async function checkAuthSessionStatus(): Promise<{
   authenticated: boolean;
   setupRequired: boolean;
@@ -570,21 +521,18 @@ export async function checkAuthSessionStatus(): Promise<{
       if (effectiveCsrf) {
         setActiveSessionTokens(undefined, effectiveCsrf);
       }
-      const unifiedState = await reconcileLocalStateIfNeeded(
-        stateRes.data.state,
-        effectiveCsrf
-      );
+      const authoritativeState = stateRes.data.state as DatabaseState;
       updateLastKnownSyncMeta(
         stateRes.data.revision,
         stateRes.data.signature,
-        unifiedState
+        authoritativeState
       );
       return {
         authenticated: true,
         setupRequired: false,
         user: stateRes.data.currentUser || statusRes.data.user,
         csrfToken: effectiveCsrf,
-        state: unifiedState,
+        state: authoritativeState,
         revision: getLastKnownServerRevision(),
       };
     }
@@ -664,11 +612,11 @@ export async function fetchAuthoritativeState(csrfToken?: string): Promise<{
     if (effectiveCsrf) {
       setActiveSessionTokens(undefined, effectiveCsrf);
     }
-    const unifiedState = await reconcileLocalStateIfNeeded(res.data.state, effectiveCsrf);
-    updateLastKnownSyncMeta(res.data.revision, res.data.signature, unifiedState);
+    const authoritativeState = res.data.state as DatabaseState;
+    updateLastKnownSyncMeta(res.data.revision, res.data.signature, authoritativeState);
     return {
       authenticated: true,
-      state: unifiedState,
+      state: authoritativeState,
       currentUser: res.data.currentUser,
       csrfToken: effectiveCsrf,
       revision: getLastKnownServerRevision(),
@@ -695,6 +643,7 @@ export async function syncStateWithServer(
   options?: {
     baseRevision?: number;
     deletedIds?: string[];
+    forceAuthoritative?: boolean;
   }
 ): Promise<{
   authenticated: boolean;
@@ -707,6 +656,7 @@ export async function syncStateWithServer(
     state: stateToSync,
     baseRevision: effectiveBaseRevision > 0 ? effectiveBaseRevision : undefined,
     deletedIds: options?.deletedIds,
+    forceAuthoritative: options?.forceAuthoritative ?? true,
   });
 
   let res = await safeApiFetch(

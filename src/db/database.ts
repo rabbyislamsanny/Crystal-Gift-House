@@ -866,16 +866,17 @@ export class DatabaseService {
 
   constructor(options?: { initialEmptySetup?: boolean }) {
     this.allowEmptyUsers = Boolean(options?.initialEmptySetup);
+    const hadSavedState = Boolean(this.getStorageItem(STORAGE_KEY));
     this.state = this.loadFromStorage();
     if (this.allowEmptyUsers) {
       this.state.users = [];
     } else {
-      this.ensureCatalogueAndUsersUpToDate();
+      this.ensureCatalogueAndUsersUpToDate(hadSavedState);
     }
-    this.reconcileReservedStock();
+    this.reconcileReservedStock(hadSavedState);
   }
 
-  private ensureCatalogueAndUsersUpToDate(): void {
+  private ensureCatalogueAndUsersUpToDate(persistIfChanged: boolean = false): void {
     let changed = false;
     if (!this.state.users || this.state.users.length === 0) {
       this.state.users = JSON.parse(JSON.stringify(INITIAL_USERS));
@@ -885,23 +886,20 @@ export class DatabaseService {
       this.state.rolePermissions = getDefaultRolePermissions();
       changed = true;
     }
-    // Ensure prod-6 (Islamic Crystal Ball) and product aliases exist even when loading older localStorage snapshots
+    // Backfill product aliases on existing products without re-adding deleted/cleared products
     for (const initProd of INITIAL_PRODUCTS) {
       const existing = this.state.products.find((p) => p.id === initProd.id || p.sku === initProd.sku);
-      if (!existing && initProd.id === 'prod-6') {
-        this.state.products.push(JSON.parse(JSON.stringify(initProd)));
-        changed = true;
-      } else if (existing && !existing.aliases && initProd.aliases) {
+      if (existing && !existing.aliases && initProd.aliases) {
         existing.aliases = [...initProd.aliases];
         changed = true;
       }
     }
-    if (changed) {
+    if (changed && persistIfChanged) {
       this.saveToStorage();
     }
   }
 
-  private reconcileReservedStock(): void {
+  private reconcileReservedStock(persistIfChanged: boolean = false): void {
     const reservedMap: Record<string, number> = {};
     for (const ord of this.state.orders) {
       if (['confirmed', 'processing', 'packed'].includes(ord.status)) {
@@ -918,7 +916,7 @@ export class DatabaseService {
         changed = true;
       }
     }
-    if (changed) {
+    if (changed && persistIfChanged) {
       this.saveToStorage();
     }
   }
@@ -961,20 +959,20 @@ export class DatabaseService {
             : JSON.parse(JSON.stringify(INITIAL_USERS));
 
         return {
-          products: parsed.products || INITIAL_PRODUCTS,
-          suppliers: parsed.suppliers || INITIAL_SUPPLIERS,
-          purchaseOrders: parsed.purchaseOrders || [],
-          stockMovements: parsed.stockMovements || INITIAL_STOCK_MOVEMENTS,
-          customers: parsed.customers || INITIAL_CUSTOMERS,
-          orders: parsed.orders || INITIAL_ORDERS,
-          parcels: parsed.parcels || INITIAL_PARCELS,
-          adExpenses: parsed.adExpenses || INITIAL_AD_EXPENSES,
-          operatingExpenses: parsed.operatingExpenses || INITIAL_OPERATING_EXPENSES,
-          courierSettlements: parsed.courierSettlements || [],
-          bankAccounts: parsed.bankAccounts || INITIAL_BANK_ACCOUNTS,
-          cashTransactions: parsed.cashTransactions || INITIAL_CASH_TRANSACTIONS,
-          auditLogs: parsed.auditLogs || INITIAL_AUDIT_LOGS,
-          trash: parsed.trash || [],
+          products: Array.isArray(parsed.products) ? parsed.products : INITIAL_PRODUCTS,
+          suppliers: Array.isArray(parsed.suppliers) ? parsed.suppliers : INITIAL_SUPPLIERS,
+          purchaseOrders: Array.isArray(parsed.purchaseOrders) ? parsed.purchaseOrders : [],
+          stockMovements: Array.isArray(parsed.stockMovements) ? parsed.stockMovements : INITIAL_STOCK_MOVEMENTS,
+          customers: Array.isArray(parsed.customers) ? parsed.customers : INITIAL_CUSTOMERS,
+          orders: Array.isArray(parsed.orders) ? parsed.orders : INITIAL_ORDERS,
+          parcels: Array.isArray(parsed.parcels) ? parsed.parcels : INITIAL_PARCELS,
+          adExpenses: Array.isArray(parsed.adExpenses) ? parsed.adExpenses : INITIAL_AD_EXPENSES,
+          operatingExpenses: Array.isArray(parsed.operatingExpenses) ? parsed.operatingExpenses : INITIAL_OPERATING_EXPENSES,
+          courierSettlements: Array.isArray(parsed.courierSettlements) ? parsed.courierSettlements : [],
+          bankAccounts: Array.isArray(parsed.bankAccounts) ? parsed.bankAccounts : INITIAL_BANK_ACCOUNTS,
+          cashTransactions: Array.isArray(parsed.cashTransactions) ? parsed.cashTransactions : INITIAL_CASH_TRANSACTIONS,
+          auditLogs: Array.isArray(parsed.auditLogs) ? parsed.auditLogs : INITIAL_AUDIT_LOGS,
+          trash: Array.isArray(parsed.trash) ? parsed.trash : [],
           users: loadedUsers,
           rolePermissions: parsed.rolePermissions || getDefaultRolePermissions(),
           settings: { ...INITIAL_SETTINGS, ...(parsed.settings || {}) },
@@ -1664,6 +1662,43 @@ export class DatabaseService {
       }
     }
     return { success: deletedCount > 0, deletedCount, errors };
+  }
+
+  public resetInventory(options?: { performedBy?: string }): {
+    success: boolean;
+    clearedProducts: number;
+    clearedMovements: number;
+    deletedIds: string[];
+  } {
+    const clearedProducts = this.state.products.length;
+    const clearedMovements = this.state.stockMovements.length;
+    const deletedIds = [
+      ...this.state.products.map((p) => p.id),
+      ...this.state.stockMovements.map((m) => m.id),
+    ];
+
+    this.state.products = [];
+    this.state.stockMovements = [];
+    this.state.trash = (this.state.trash || []).filter(
+      (t) => t.entityType !== 'Product' && t.entityType !== 'StockMovement'
+    );
+
+    const actorName = options?.performedBy || this.getCurrentUser()?.fullName || 'Super Admin';
+    this.logAudit(
+      'FRESH_INVENTORY_RESET',
+      'Inventory',
+      'ALL_PRODUCTS',
+      `Initialized Fresh Inventory: cleared ${clearedProducts} product(s) and ${clearedMovements} stock movement(s). Ready for fresh stock entry.`,
+      actorName,
+      'inventory'
+    );
+    this.saveToStorage();
+    return {
+      success: true,
+      clearedProducts,
+      clearedMovements,
+      deletedIds,
+    };
   }
 
   public recordStockMovement(mov: Omit<StockMovement, 'id' | 'date'>): StockMovement {
