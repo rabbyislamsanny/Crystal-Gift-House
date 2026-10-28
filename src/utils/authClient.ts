@@ -11,9 +11,16 @@ import {
   sanitizeUserForClient,
   ServerSessionStore,
 } from './authSecurity';
+import {
+  computeStateSignature,
+  findUnsyncedLocalRecords,
+} from './stateSync';
 
 const ACTIVE_SESSION_STORAGE_KEY = 'cgh_active_session_v1';
 const LOCAL_SESSION_STORE_KEY = 'cgh_local_session_record_v1';
+const LOCAL_RECONCILED_FLAG_KEY = 'cgh_server_reconciled_v1';
+export const SYNC_BROADCAST_CHANNEL_NAME = 'cgh_business_os_sync_v1';
+export const SYNC_STORAGE_PING_KEY = 'cgh_last_sync_ping_v1';
 
 interface StoredSessionTokens {
   sessionToken: string;
@@ -34,6 +41,8 @@ interface PersistedLocalSession {
 
 let inMemorySessionToken = '';
 let inMemoryCsrfToken = '';
+let inMemoryServerRevision = 0;
+let inMemoryStateSignature = '';
 
 const fallbackSessionStore = new ServerSessionStore(12 * 60 * 60 * 1000);
 const fallbackRateLimiter = new LoginRateLimiter({
@@ -41,6 +50,49 @@ const fallbackRateLimiter = new LoginRateLimiter({
   windowMs: 15 * 60 * 1000,
   lockoutMs: 15 * 60 * 1000,
 });
+
+export function getLastKnownServerRevision(): number {
+  return inMemoryServerRevision;
+}
+
+export function getLastKnownStateSignature(): string {
+  return inMemoryStateSignature;
+}
+
+export function updateLastKnownSyncMeta(revision?: number, signature?: string, state?: DatabaseState): void {
+  if (typeof revision === 'number' && revision > 0) {
+    inMemoryServerRevision = revision;
+  }
+  if (typeof signature === 'string' && signature) {
+    inMemoryStateSignature = signature;
+  } else if (state) {
+    inMemoryStateSignature = computeStateSignature(state);
+  }
+}
+
+export function broadcastStateSyncEvent(eventType: 'state_updated' | 'logged_out' = 'state_updated', revision?: number): void {
+  const payload = {
+    type: eventType,
+    revision: revision ?? inMemoryServerRevision,
+    timestamp: Date.now(),
+  };
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      const channel = new BroadcastChannel(SYNC_BROADCAST_CHANNEL_NAME);
+      channel.postMessage(payload);
+      channel.close();
+    }
+  } catch {
+    // ignore BroadcastChannel issues
+  }
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(SYNC_STORAGE_PING_KEY, JSON.stringify(payload));
+    }
+  } catch {
+    // ignore storage issues
+  }
+}
 
 function loadStoredTokens(): StoredSessionTokens | null {
   if (inMemorySessionToken && inMemoryCsrfToken) {
@@ -61,6 +113,17 @@ function loadStoredTokens(): StoredSessionTokens | null {
         }
       }
     }
+    if (typeof localStorage !== 'undefined') {
+      const rawLocal = localStorage.getItem(ACTIVE_SESSION_STORAGE_KEY);
+      if (rawLocal) {
+        const parsed = JSON.parse(rawLocal) as StoredSessionTokens;
+        if (parsed?.sessionToken && parsed?.csrfToken) {
+          inMemorySessionToken = parsed.sessionToken;
+          inMemoryCsrfToken = parsed.csrfToken;
+          return parsed;
+        }
+      }
+    }
   } catch {
     // ignore storage access issues
   }
@@ -71,15 +134,18 @@ export function setActiveSessionTokens(sessionToken?: string, csrfToken?: string
   if (sessionToken) inMemorySessionToken = sessionToken;
   if (csrfToken) inMemoryCsrfToken = csrfToken;
   try {
-    if (typeof sessionStorage !== 'undefined' && inMemorySessionToken && inMemoryCsrfToken) {
-      sessionStorage.setItem(
-        ACTIVE_SESSION_STORAGE_KEY,
-        JSON.stringify({
-          sessionToken: inMemorySessionToken,
-          csrfToken: inMemoryCsrfToken,
-          expiresAt,
-        })
-      );
+    if (inMemorySessionToken && inMemoryCsrfToken) {
+      const serialized = JSON.stringify({
+        sessionToken: inMemorySessionToken,
+        csrfToken: inMemoryCsrfToken,
+        expiresAt,
+      });
+      if (typeof sessionStorage !== 'undefined') {
+        sessionStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, serialized);
+      }
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(ACTIVE_SESSION_STORAGE_KEY, serialized);
+      }
     }
   } catch {
     // ignore storage access issues
@@ -93,6 +159,10 @@ export function clearActiveSessionTokens(): void {
     if (typeof sessionStorage !== 'undefined') {
       sessionStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
       sessionStorage.removeItem(LOCAL_SESSION_STORE_KEY);
+    }
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(ACTIVE_SESSION_STORAGE_KEY);
+      localStorage.removeItem(LOCAL_SESSION_STORE_KEY);
     }
   } catch {
     // ignore storage access issues
@@ -109,8 +179,12 @@ export function getActiveSessionTokens(): { sessionToken: string; csrfToken: str
 
 function saveFallbackSessionRecord(record: PersistedLocalSession): void {
   try {
+    const serialized = JSON.stringify(record);
     if (typeof sessionStorage !== 'undefined') {
-      sessionStorage.setItem(LOCAL_SESSION_STORE_KEY, JSON.stringify(record));
+      sessionStorage.setItem(LOCAL_SESSION_STORE_KEY, serialized);
+    }
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(LOCAL_SESSION_STORE_KEY, serialized);
     }
   } catch {
     // ignore
@@ -123,6 +197,12 @@ function getFallbackSessionRecord(): PersistedLocalSession | null {
       const raw = sessionStorage.getItem(LOCAL_SESSION_STORE_KEY);
       if (raw) {
         return JSON.parse(raw) as PersistedLocalSession;
+      }
+    }
+    if (typeof localStorage !== 'undefined') {
+      const rawLocal = localStorage.getItem(LOCAL_SESSION_STORE_KEY);
+      if (rawLocal) {
+        return JSON.parse(rawLocal) as PersistedLocalSession;
       }
     }
   } catch {
@@ -409,12 +489,63 @@ export async function setupSuperAdminWithAuthServer(input: {
   };
 }
 
+async function reconcileLocalStateIfNeeded(
+  serverState: DatabaseState,
+  csrfToken?: string
+): Promise<DatabaseState> {
+  try {
+    if (typeof localStorage !== 'undefined' && localStorage.getItem(LOCAL_RECONCILED_FLAG_KEY) === '1') {
+      return serverState;
+    }
+    const rawLocal = db.getRawSavedLocalState();
+    if (!rawLocal) {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(LOCAL_RECONCILED_FLAG_KEY, '1');
+      }
+      return serverState;
+    }
+    const check = findUnsyncedLocalRecords(rawLocal, serverState);
+    if (!check.hasUnsynced) {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(LOCAL_RECONCILED_FLAG_KEY, '1');
+      }
+      return serverState;
+    }
+
+    const reconcileRes = await safeApiFetch(
+      '/api/state/reconcile',
+      {
+        method: 'POST',
+        body: JSON.stringify({ state: rawLocal }),
+      },
+      csrfToken
+    );
+
+    if (reconcileRes.reachable && reconcileRes.ok && reconcileRes.data?.state) {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(LOCAL_RECONCILED_FLAG_KEY, '1');
+      }
+      updateLastKnownSyncMeta(
+        reconcileRes.data.revision,
+        reconcileRes.data.signature,
+        reconcileRes.data.state
+      );
+      broadcastStateSyncEvent('state_updated', reconcileRes.data.revision);
+      return reconcileRes.data.state as DatabaseState;
+    }
+  } catch {
+    // ignore reconciliation errors and preserve serverState
+  }
+  return serverState;
+}
+
 export async function checkAuthSessionStatus(): Promise<{
   authenticated: boolean;
   setupRequired: boolean;
   user?: UserAccount;
   csrfToken?: string;
   state?: DatabaseState;
+  revision?: number;
 }> {
   const statusRes = await safeApiFetch('/api/auth/status', { method: 'GET' });
 
@@ -427,16 +558,34 @@ export async function checkAuthSessionStatus(): Promise<{
       };
     }
 
-    setActiveSessionTokens(statusRes.data.sessionToken, statusRes.data.csrfToken, statusRes.data.expiresAt);
+    setActiveSessionTokens(
+      statusRes.data.sessionToken,
+      statusRes.data.csrfToken,
+      statusRes.data.expiresAt
+    );
 
     const stateRes = await safeApiFetch('/api/state', { method: 'GET' }, statusRes.data.csrfToken);
     if (stateRes.reachable && stateRes.ok && stateRes.data?.state) {
+      const effectiveCsrf = stateRes.data.csrfToken || statusRes.data.csrfToken;
+      if (effectiveCsrf) {
+        setActiveSessionTokens(undefined, effectiveCsrf);
+      }
+      const unifiedState = await reconcileLocalStateIfNeeded(
+        stateRes.data.state,
+        effectiveCsrf
+      );
+      updateLastKnownSyncMeta(
+        stateRes.data.revision,
+        stateRes.data.signature,
+        unifiedState
+      );
       return {
         authenticated: true,
         setupRequired: false,
         user: stateRes.data.currentUser || statusRes.data.user,
-        csrfToken: stateRes.data.csrfToken || statusRes.data.csrfToken,
-        state: stateRes.data.state,
+        csrfToken: effectiveCsrf,
+        state: unifiedState,
+        revision: getLastKnownServerRevision(),
       };
     }
 
@@ -467,11 +616,43 @@ export async function checkAuthSessionStatus(): Promise<{
   };
 }
 
+export async function fetchServerVersion(csrfToken?: string): Promise<{
+  reachable: boolean;
+  authenticated: boolean;
+  revision?: number;
+  signature?: string;
+  csrfToken?: string;
+}> {
+  const res = await safeApiFetch('/api/state/version', { method: 'GET' }, csrfToken);
+  if (!res.reachable) {
+    return { reachable: false, authenticated: true };
+  }
+  if (res.status === 401 || !res.ok || !res.data?.success) {
+    if (res.status === 401) {
+      clearActiveSessionTokens();
+      return { reachable: true, authenticated: false };
+    }
+    return { reachable: false, authenticated: true };
+  }
+  if (res.data.csrfToken) {
+    setActiveSessionTokens(undefined, res.data.csrfToken);
+  }
+  return {
+    reachable: true,
+    authenticated: true,
+    revision: res.data.revision,
+    signature: res.data.signature,
+    csrfToken: res.data.csrfToken,
+  };
+}
+
 export async function fetchAuthoritativeState(csrfToken?: string): Promise<{
   authenticated: boolean;
   state?: DatabaseState;
   currentUser?: UserAccount;
   csrfToken?: string;
+  revision?: number;
+  signature?: string;
 }> {
   const res = await safeApiFetch('/api/state', { method: 'GET' }, csrfToken);
   if (res.reachable) {
@@ -479,14 +660,19 @@ export async function fetchAuthoritativeState(csrfToken?: string): Promise<{
       clearActiveSessionTokens();
       return { authenticated: false };
     }
-    if (res.data.csrfToken) {
-      setActiveSessionTokens(undefined, res.data.csrfToken);
+    const effectiveCsrf = res.data.csrfToken || csrfToken;
+    if (effectiveCsrf) {
+      setActiveSessionTokens(undefined, effectiveCsrf);
     }
+    const unifiedState = await reconcileLocalStateIfNeeded(res.data.state, effectiveCsrf);
+    updateLastKnownSyncMeta(res.data.revision, res.data.signature, unifiedState);
     return {
       authenticated: true,
-      state: res.data.state,
+      state: unifiedState,
       currentUser: res.data.currentUser,
-      csrfToken: res.data.csrfToken || csrfToken,
+      csrfToken: effectiveCsrf,
+      revision: getLastKnownServerRevision(),
+      signature: getLastKnownStateSignature(),
     };
   }
 
@@ -505,19 +691,52 @@ export async function fetchAuthoritativeState(csrfToken?: string): Promise<{
 
 export async function syncStateWithServer(
   stateToSync: DatabaseState,
-  csrfToken?: string
+  csrfToken?: string,
+  options?: {
+    baseRevision?: number;
+    deletedIds?: string[];
+  }
 ): Promise<{
   authenticated: boolean;
   state?: DatabaseState;
+  revision?: number;
+  csrfToken?: string;
 }> {
-  const res = await safeApiFetch(
+  const effectiveBaseRevision = options?.baseRevision ?? inMemoryServerRevision;
+  const payloadBody = JSON.stringify({
+    state: stateToSync,
+    baseRevision: effectiveBaseRevision > 0 ? effectiveBaseRevision : undefined,
+    deletedIds: options?.deletedIds,
+  });
+
+  let res = await safeApiFetch(
     '/api/state/sync',
     {
       method: 'POST',
-      body: JSON.stringify({ state: stateToSync }),
+      body: payloadBody,
     },
     csrfToken
   );
+
+  // If CSRF token was rotated or out of sync across tabs, refresh status once and retry
+  if (res.reachable && res.status === 403) {
+    const statusRefresh = await safeApiFetch('/api/auth/status', { method: 'GET' });
+    if (statusRefresh.reachable && statusRefresh.data?.authenticated && statusRefresh.data?.csrfToken) {
+      setActiveSessionTokens(
+        statusRefresh.data.sessionToken,
+        statusRefresh.data.csrfToken,
+        statusRefresh.data.expiresAt
+      );
+      res = await safeApiFetch(
+        '/api/state/sync',
+        {
+          method: 'POST',
+          body: payloadBody,
+        },
+        statusRefresh.data.csrfToken
+      );
+    }
+  }
 
   if (res.reachable) {
     if (res.status === 401) {
@@ -525,13 +744,93 @@ export async function syncStateWithServer(
       return { authenticated: false };
     }
     if (res.ok && res.data?.state) {
-      return { authenticated: true, state: res.data.state };
+      updateLastKnownSyncMeta(res.data.revision, res.data.signature, res.data.state);
+      broadcastStateSyncEvent('state_updated', res.data.revision);
+      return {
+        authenticated: true,
+        state: res.data.state,
+        revision: res.data.revision,
+        csrfToken: getActiveSessionTokens().csrfToken,
+      };
     }
   }
 
   return {
     authenticated: true,
     state: db.getSanitizedStateForClient(),
+  };
+}
+
+export async function mutateOnServer<T = any>(
+  action: string,
+  payload: any,
+  csrfToken?: string
+): Promise<{
+  reachable: boolean;
+  authenticated: boolean;
+  success: boolean;
+  result?: T;
+  state?: DatabaseState;
+  revision?: number;
+  error?: string;
+}> {
+  const bodyStr = JSON.stringify({ action, payload });
+  let res = await safeApiFetch(
+    '/api/db/mutate',
+    {
+      method: 'POST',
+      body: bodyStr,
+    },
+    csrfToken
+  );
+
+  if (res.reachable && res.status === 403) {
+    const statusRefresh = await safeApiFetch('/api/auth/status', { method: 'GET' });
+    if (statusRefresh.reachable && statusRefresh.data?.authenticated && statusRefresh.data?.csrfToken) {
+      setActiveSessionTokens(
+        statusRefresh.data.sessionToken,
+        statusRefresh.data.csrfToken,
+        statusRefresh.data.expiresAt
+      );
+      res = await safeApiFetch(
+        '/api/db/mutate',
+        {
+          method: 'POST',
+          body: bodyStr,
+        },
+        statusRefresh.data.csrfToken
+      );
+    }
+  }
+
+  if (!res.reachable) {
+    return { reachable: false, authenticated: true, success: false };
+  }
+  if (res.status === 401) {
+    clearActiveSessionTokens();
+    return { reachable: true, authenticated: false, success: false, error: 'Authentication required.' };
+  }
+  if (!res.ok || !res.data?.success) {
+    return {
+      reachable: true,
+      authenticated: true,
+      success: false,
+      error: res.data?.error || 'Server mutation failed.',
+    };
+  }
+
+  if (res.data.state) {
+    updateLastKnownSyncMeta(res.data.revision, res.data.signature, res.data.state);
+    broadcastStateSyncEvent('state_updated', res.data.revision);
+  }
+
+  return {
+    reachable: true,
+    authenticated: true,
+    success: true,
+    result: res.data.result as T,
+    state: res.data.state as DatabaseState,
+    revision: res.data.revision,
   };
 }
 
@@ -548,6 +847,7 @@ export async function logoutFromAuthServer(csrfToken?: string): Promise<void> {
     csrfToken
   );
   clearActiveSessionTokens();
+  broadcastStateSyncEvent('logged_out');
 }
 
 export async function createUserOnServer(

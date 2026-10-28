@@ -31,6 +31,10 @@ import {
   recalculateAndValidateDraft,
   matchProductFromCatalogue,
 } from './src/utils/aiOrderParser';
+import {
+  computeStateSignature,
+  mergeDatabaseStates,
+} from './src/utils/stateSync';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -59,19 +63,35 @@ export function createApp(options?: CreateAppOptions) {
     initialEmptySetup: options?.initialEmptySetup,
   });
 
+  let stateRevision = 1;
+  let lastUpdatedAt = new Date().toISOString();
+
   const persistFilePath =
     options?.persistFilePath !== undefined
       ? options.persistFilePath
       : path.join(__dirname, '.data', 'cgh-server-state.json');
+
+  const persistSessionFilePath = persistFilePath
+    ? path.join(path.dirname(persistFilePath), 'cgh-server-sessions.json')
+    : null;
 
   // Load persisted server database state if available (unless running isolated test instance)
   if (persistFilePath && !options?.initialEmptySetup) {
     try {
       if (fs.existsSync(persistFilePath)) {
         const raw = fs.readFileSync(persistFilePath, 'utf-8');
-        const parsed = JSON.parse(raw) as DatabaseState;
+        const parsed = JSON.parse(raw) as DatabaseState & {
+          _metaRevision?: number;
+          _metaUpdatedAt?: string;
+        };
         if (parsed && Array.isArray(parsed.users) && parsed.users.length > 0) {
           serverDb.hydrateFromServer(parsed);
+          if (typeof parsed._metaRevision === 'number' && parsed._metaRevision > 0) {
+            stateRevision = parsed._metaRevision;
+          }
+          if (typeof parsed._metaUpdatedAt === 'string') {
+            lastUpdatedAt = parsed._metaUpdatedAt;
+          }
         }
       }
     } catch (err) {
@@ -79,20 +99,68 @@ export function createApp(options?: CreateAppOptions) {
     }
   }
 
-  function persistServerState(): void {
+  function persistServerState(bumpRevision: boolean = true): void {
+    if (bumpRevision) {
+      stateRevision += 1;
+      lastUpdatedAt = new Date().toISOString();
+    }
     if (!persistFilePath) return;
     try {
       const dir = path.dirname(persistFilePath);
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      fs.writeFileSync(persistFilePath, JSON.stringify(serverDb.getState()), 'utf-8');
+      // Keep a safe backup of the previous valid state before overwriting
+      if (fs.existsSync(persistFilePath)) {
+        try {
+          fs.copyFileSync(persistFilePath, `${persistFilePath}.backup`);
+        } catch {
+          // ignore backup copy warning
+        }
+      }
+      const payloadToSave = {
+        ...serverDb.getState(),
+        _metaRevision: stateRevision,
+        _metaUpdatedAt: lastUpdatedAt,
+      };
+      const tmpPath = `${persistFilePath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(payloadToSave), 'utf-8');
+      fs.renameSync(tmpPath, persistFilePath);
     } catch (err) {
       console.error('Failed to persist server state:', err);
     }
   }
 
   const sessionStore = new ServerSessionStore(options?.sessionTtlMs ?? SESSION_TTL_MS);
+
+  // Restore active sessions across server restarts
+  if (persistSessionFilePath && !options?.initialEmptySetup) {
+    try {
+      if (fs.existsSync(persistSessionFilePath)) {
+        const rawSessions = fs.readFileSync(persistSessionFilePath, 'utf-8');
+        const parsedSessions = JSON.parse(rawSessions) as ServerSessionRecord[];
+        sessionStore.hydrateSessions(parsedSessions);
+      }
+    } catch {
+      // ignore session hydration warnings
+    }
+  }
+
+  function persistSessions(): void {
+    if (!persistSessionFilePath) return;
+    try {
+      const dir = path.dirname(persistSessionFilePath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      const tmpPath = `${persistSessionFilePath}.tmp`;
+      fs.writeFileSync(tmpPath, JSON.stringify(sessionStore.exportSessions()), 'utf-8');
+      fs.renameSync(tmpPath, persistSessionFilePath);
+    } catch {
+      // ignore session persistence warnings
+    }
+  }
+
   const loginRateLimiter = new LoginRateLimiter({
     maxAttempts: options?.maxLoginAttempts ?? 5,
     windowMs: 15 * 60 * 1000,
@@ -190,8 +258,8 @@ export function createApp(options?: CreateAppOptions) {
 
     req.authUser = validation.user;
     req.authSession = validation.session;
-    // Set actor context on serverDb for accurate audit logs
-    serverDb.setCurrentUser(validation.user.id);
+    // Set actor context on serverDb for accurate audit logs without spamming USER_SWITCH_SESSION
+    serverDb.setCurrentUser(validation.user.id, { silent: true });
     next();
   }
 
@@ -251,6 +319,8 @@ export function createApp(options?: CreateAppOptions) {
       sessionToken: validation.session.token,
       csrfToken: validation.session.csrfToken,
       expiresAt: new Date(validation.session.expiresAt).toISOString(),
+      revision: stateRevision,
+      lastUpdatedAt,
     });
   });
 
@@ -276,6 +346,7 @@ export function createApp(options?: CreateAppOptions) {
 
     persistServerState();
     const session = sessionStore.createSession(result.user);
+    persistSessions();
     setSessionCookie(req, res, session.token);
 
     res.status(201).json({
@@ -284,6 +355,8 @@ export function createApp(options?: CreateAppOptions) {
       sessionToken: session.token,
       csrfToken: session.csrfToken,
       expiresAt: new Date(session.expiresAt).toISOString(),
+      revision: stateRevision,
+      lastUpdatedAt,
     });
   });
 
@@ -315,7 +388,7 @@ export function createApp(options?: CreateAppOptions) {
         'Security Guard',
         'users'
       );
-      persistServerState();
+      persistServerState(false);
       res.status(429).json({
         success: false,
         error: `Too many failed login attempts. Account login is temporarily locked. Please try again in ${rateCheck.retryAfterSeconds} seconds.`,
@@ -327,7 +400,7 @@ export function createApp(options?: CreateAppOptions) {
     const authResult = serverDb.authenticateUser(rawIdentifier, rawPassword);
     if (!authResult.success || !authResult.user) {
       const failureStatus = loginRateLimiter.recordFailure(rateKey);
-      persistServerState();
+      persistServerState(false);
 
       const isDeactivated =
         authResult.error?.toLowerCase().includes('deactivated') ||
@@ -344,9 +417,10 @@ export function createApp(options?: CreateAppOptions) {
     }
 
     loginRateLimiter.reset(rateKey);
-    persistServerState();
+    persistServerState(false);
 
     const session = sessionStore.createSession(authResult.user);
+    persistSessions();
     setSessionCookie(req, res, session.token);
 
     res.json({
@@ -355,6 +429,8 @@ export function createApp(options?: CreateAppOptions) {
       sessionToken: session.token,
       csrfToken: session.csrfToken,
       expiresAt: new Date(session.expiresAt).toISOString(),
+      revision: stateRevision,
+      lastUpdatedAt,
     });
   });
 
@@ -372,9 +448,10 @@ export function createApp(options?: CreateAppOptions) {
           validation.user.fullName,
           'users'
         );
-        persistServerState();
+        persistServerState(false);
       }
       sessionStore.invalidateSession(token);
+      persistSessions();
     }
     clearSessionCookie(req, res);
     res.json({ success: true });
@@ -384,17 +461,60 @@ export function createApp(options?: CreateAppOptions) {
   // PROTECTED PRIVATE ROUTES (Require valid HttpOnly session + CSRF on writes)
   // ---------------------------------------------------------------------------
 
-  // Fetch authoritative sanitized database state for authenticated user
-  app.get('/api/state', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  // Lightweight state version & signature endpoint for real-time cross-browser sync
+  app.get('/api/state/version', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const currentState = serverDb.getState();
     res.json({
       success: true,
-      state: serverDb.getSanitizedStateForClient(),
-      currentUser: sanitizeUserForClient(req.authUser!),
+      revision: stateRevision,
+      lastUpdatedAt,
+      signature: computeStateSignature(currentState),
       csrfToken: req.authSession!.csrfToken,
     });
   });
 
+  // Fetch authoritative sanitized database state for authenticated user
+  app.get('/api/state', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const sanitized = serverDb.getSanitizedStateForClient();
+    res.json({
+      success: true,
+      state: sanitized,
+      currentUser: sanitizeUserForClient(req.authUser!),
+      csrfToken: req.authSession!.csrfToken,
+      revision: stateRevision,
+      lastUpdatedAt,
+      signature: computeStateSignature(sanitized),
+    });
+  });
+
+  // Safe non-destructive reconciliation of unsynced browser localStorage records into central database
+  app.post('/api/state/reconcile', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const incoming = req.body?.state as Partial<DatabaseState> | undefined;
+    if (!incoming || typeof incoming !== 'object') {
+      res.status(400).json({ success: false, error: 'Invalid state payload for reconciliation.' });
+      return;
+    }
+
+    const currentServerState = serverDb.getState();
+    const mergedState = mergeDatabaseStates(currentServerState, incoming, {
+      mode: 'safe_merge',
+    });
+
+    serverDb.hydrateFromServer(mergedState, req.authUser);
+    persistServerState(true);
+
+    const sanitized = serverDb.getSanitizedStateForClient();
+    res.json({
+      success: true,
+      state: sanitized,
+      revision: stateRevision,
+      lastUpdatedAt,
+      signature: computeStateSignature(sanitized),
+    });
+  });
+
   // Synchronize authorized operational data changes while preserving server-side user credentials
+  // and preventing stale tabs/browsers from clobbering concurrent updates
   app.post('/api/state/sync', requireAuth, (req: AuthenticatedRequest, res: Response) => {
     const incoming = req.body?.state as Partial<DatabaseState> | undefined;
     if (!incoming || typeof incoming !== 'object') {
@@ -402,56 +522,175 @@ export function createApp(options?: CreateAppOptions) {
       return;
     }
 
+    const clientBaseRevision =
+      typeof req.body?.baseRevision === 'number' ? req.body.baseRevision : undefined;
+    const explicitDeletedIds = Array.isArray(req.body?.deletedIds)
+      ? (req.body.deletedIds as string[])
+      : undefined;
+
+    // If client's baseRevision is older than the server's current stateRevision,
+    // another browser/tab has updated the central database in the meantime:
+    // use 'safe_merge' so concurrent additions in the other browser are preserved,
+    // while still honoring explicit deletions in `deletedIds` or `trash`.
+    const isClientStale =
+      clientBaseRevision !== undefined && clientBaseRevision < stateRevision;
+    const mergeMode = isClientStale ? 'safe_merge' : 'authoritative_client';
+
     const currentServerState = serverDb.getState();
-    const mergedState: DatabaseState = {
-      ...currentServerState,
-      products: Array.isArray(incoming.products) ? incoming.products : currentServerState.products,
-      suppliers: Array.isArray(incoming.suppliers) ? incoming.suppliers : currentServerState.suppliers,
-      purchaseOrders: Array.isArray(incoming.purchaseOrders)
-        ? incoming.purchaseOrders
-        : currentServerState.purchaseOrders,
-      stockMovements: Array.isArray(incoming.stockMovements)
-        ? incoming.stockMovements
-        : currentServerState.stockMovements,
-      customers: Array.isArray(incoming.customers) ? incoming.customers : currentServerState.customers,
-      orders: Array.isArray(incoming.orders) ? incoming.orders : currentServerState.orders,
-      parcels: Array.isArray(incoming.parcels) ? incoming.parcels : currentServerState.parcels,
-      adExpenses: Array.isArray(incoming.adExpenses) ? incoming.adExpenses : currentServerState.adExpenses,
-      operatingExpenses: Array.isArray(incoming.operatingExpenses)
-        ? incoming.operatingExpenses
-        : currentServerState.operatingExpenses,
-      courierSettlements: Array.isArray(incoming.courierSettlements)
-        ? incoming.courierSettlements
-        : currentServerState.courierSettlements,
-      bankAccounts: Array.isArray(incoming.bankAccounts)
-        ? incoming.bankAccounts
-        : currentServerState.bankAccounts,
-      cashTransactions: Array.isArray(incoming.cashTransactions)
-        ? incoming.cashTransactions
-        : currentServerState.cashTransactions,
-      auditLogs: Array.isArray(incoming.auditLogs)
-        ? incoming.auditLogs.slice(0, 500)
-        : currentServerState.auditLogs,
-      trash: Array.isArray(incoming.trash) ? incoming.trash : currentServerState.trash,
-      // Users and rolePermissions are strictly managed via dedicated server endpoints
-      users: currentServerState.users,
-      rolePermissions: currentServerState.rolePermissions,
-      settings: incoming.settings
-        ? {
-            ...currentServerState.settings,
-            ...incoming.settings,
-            ownerPin: currentServerState.settings.ownerPin,
-          }
-        : currentServerState.settings,
-    };
+    const mergedState = mergeDatabaseStates(currentServerState, incoming, {
+      mode: mergeMode,
+      deletedIds: explicitDeletedIds,
+    });
 
     serverDb.hydrateFromServer(mergedState, req.authUser);
-    persistServerState();
+    persistServerState(true);
 
+    const sanitized = serverDb.getSanitizedStateForClient();
     res.json({
       success: true,
-      state: serverDb.getSanitizedStateForClient(),
+      state: sanitized,
+      revision: stateRevision,
+      lastUpdatedAt,
+      signature: computeStateSignature(sanitized),
     });
+  });
+
+  // Server-authoritative atomic CRUD mutation endpoint for business records
+  app.post('/api/db/mutate', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+    const { action, payload } = req.body || {};
+    if (!action || typeof action !== 'string') {
+      res.status(400).json({ success: false, error: 'Mutation action is required.' });
+      return;
+    }
+
+    const actor = req.authUser!;
+    let result: any;
+
+    try {
+      switch (action) {
+        case 'saveProduct':
+          result = serverDb.saveProduct(payload);
+          break;
+        case 'deleteProduct':
+          result = serverDb.deleteProduct(payload?.productId, payload?.options);
+          break;
+        case 'adjustStock':
+          result = serverDb.adjustStock({
+            ...payload,
+            performedBy: payload?.performedBy || actor.fullName || 'Admin',
+          });
+          break;
+        case 'createOrder':
+          result = serverDb.createOrder({
+            ...payload,
+            createdByUserId: payload?.createdByUserId || actor.id,
+            createdByName: payload?.createdByName || actor.fullName || 'Admin',
+          });
+          break;
+        case 'updateOrder':
+          result = serverDb.updateOrder(payload?.orderId, payload?.updates || {});
+          break;
+        case 'updateOrderStatus':
+          result = serverDb.updateOrderStatus({
+            ...payload,
+            performedBy: payload?.performedBy || actor.fullName || 'Admin',
+          });
+          break;
+        case 'bulkUpdateOrderStatus': {
+          const orderIds: string[] = Array.isArray(payload?.orderIds) ? payload.orderIds : [];
+          for (const id of orderIds) {
+            serverDb.updateOrderStatus({
+              orderId: id,
+              newStatus: payload.newStatus,
+              performedBy: actor.fullName || 'Admin',
+            });
+          }
+          result = { success: true };
+          break;
+        }
+        case 'deleteOrder':
+          result = serverDb.deleteOrder(payload?.orderId, payload?.reason);
+          break;
+        case 'createPurchaseOrder':
+          result = serverDb.createPurchaseOrder(payload);
+          break;
+        case 'deletePurchaseOrder':
+          result = serverDb.deletePurchaseOrder(payload?.poId);
+          break;
+        case 'receivePurchaseOrderGoods':
+          result = serverDb.receivePurchaseOrderGoods(payload?.poId);
+          break;
+        case 'saveSupplier':
+          result = serverDb.saveSupplier(payload);
+          break;
+        case 'deleteSupplier':
+          result = serverDb.deleteSupplier(payload?.supplierId);
+          break;
+        case 'saveCashTransaction':
+          result = serverDb.saveCashTransaction(payload);
+          break;
+        case 'deleteCashTransaction':
+          result = serverDb.deleteCashTransaction(payload?.txId, payload?.reason);
+          break;
+        case 'saveBankAccount':
+          result = serverDb.saveBankAccount(payload);
+          break;
+        case 'deleteBankAccount':
+          result = serverDb.deleteBankAccount(payload?.accountId);
+          break;
+        case 'settleParcels':
+          result = serverDb.settleParcels(
+            payload?.parcelIds || [],
+            payload?.bankAccountId,
+            payload?.notes
+          );
+          break;
+        case 'saveAdExpense':
+          result = serverDb.saveAdExpense(payload);
+          break;
+        case 'deleteAdExpense':
+          result = serverDb.deleteAdExpense(payload?.adId, payload?.reason);
+          break;
+        case 'saveOperatingExpense':
+          result = serverDb.saveOperatingExpense(payload);
+          break;
+        case 'deleteOperatingExpense':
+          result = serverDb.deleteOperatingExpense(payload?.expId, payload?.reason);
+          break;
+        case 'updateSettings':
+          result = serverDb.updateSettings(payload);
+          break;
+        case 'restoreBackup':
+          result = serverDb.restoreBackup(payload?.jsonString);
+          break;
+        case 'resetToDemo':
+          serverDb.resetToDemo();
+          result = { success: true };
+          break;
+        case 'runAcceptanceTests':
+          result = serverDb.runAcceptanceTests();
+          break;
+        default:
+          res.status(400).json({ success: false, error: `Unknown mutation action "${action}".` });
+          return;
+      }
+
+      persistServerState(true);
+      const sanitized = serverDb.getSanitizedStateForClient();
+      res.json({
+        success: true,
+        result,
+        state: sanitized,
+        revision: stateRevision,
+        lastUpdatedAt,
+        signature: computeStateSignature(sanitized),
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err?.message || 'Failed to execute server database mutation.',
+      });
+    }
   });
 
   // Server-authoritative User Creation
@@ -475,11 +714,13 @@ export function createApp(options?: CreateAppOptions) {
         return;
       }
 
-      persistServerState();
+      persistServerState(true);
       res.status(201).json({
         success: true,
         user: sanitizeUserForClient(result.user),
         state: serverDb.getSanitizedStateForClient(),
+        revision: stateRevision,
+        lastUpdatedAt,
       });
     }
   );
@@ -499,13 +740,16 @@ export function createApp(options?: CreateAppOptions) {
 
       if (updates?.isActive === false) {
         sessionStore.invalidateUserSessions(String(userId));
+        persistSessions();
       }
 
-      persistServerState();
+      persistServerState(true);
       res.json({
         success: true,
         user: sanitizeUserForClient(result.user),
         state: serverDb.getSanitizedStateForClient(),
+        revision: stateRevision,
+        lastUpdatedAt,
       });
     }
   );
@@ -531,21 +775,27 @@ export function createApp(options?: CreateAppOptions) {
       if (req.authUser && req.authUser.id === targetId) {
         const refreshedUser = serverDb.getUsers().find((u) => u.id === targetId)!;
         const newSession = sessionStore.createSession(refreshedUser);
+        persistSessions();
         setSessionCookie(req, res, newSession.token);
-        persistServerState();
+        persistServerState(true);
         res.json({
           success: true,
           sessionToken: newSession.token,
           csrfToken: newSession.csrfToken,
           state: serverDb.getSanitizedStateForClient(),
+          revision: stateRevision,
+          lastUpdatedAt,
         });
         return;
       }
 
-      persistServerState();
+      persistSessions();
+      persistServerState(true);
       res.json({
         success: true,
         state: serverDb.getSanitizedStateForClient(),
+        revision: stateRevision,
+        lastUpdatedAt,
       });
     }
   );
@@ -565,10 +815,13 @@ export function createApp(options?: CreateAppOptions) {
       }
 
       sessionStore.invalidateUserSessions(targetId);
-      persistServerState();
+      persistSessions();
+      persistServerState(true);
       res.json({
         success: true,
         state: serverDb.getSanitizedStateForClient(),
+        revision: stateRevision,
+        lastUpdatedAt,
       });
     }
   );
@@ -588,10 +841,13 @@ export function createApp(options?: CreateAppOptions) {
       }
 
       sessionStore.invalidateUserSessions(targetId);
-      persistServerState();
+      persistSessions();
+      persistServerState(true);
       res.json({
         success: true,
         state: serverDb.getSanitizedStateForClient(),
+        revision: stateRevision,
+        lastUpdatedAt,
       });
     }
   );
@@ -612,10 +868,12 @@ export function createApp(options?: CreateAppOptions) {
         return;
       }
 
-      persistServerState();
+      persistServerState(true);
       res.json({
         success: true,
         state: serverDb.getSanitizedStateForClient(),
+        revision: stateRevision,
+        lastUpdatedAt,
       });
     }
   );

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { db } from './db/database';
 import {
   DatabaseState,
@@ -38,10 +38,15 @@ import {
   createUserOnServer,
   deleteUserOnServer,
   fetchAuthoritativeState,
+  fetchServerVersion,
+  getLastKnownServerRevision,
+  getLastKnownStateSignature,
   loginWithAuthServer,
   logoutFromAuthServer,
   resetPasswordOnServer,
   revokeUserOnServer,
+  SYNC_BROADCAST_CHANNEL_NAME,
+  SYNC_STORAGE_PING_KEY,
   syncStateWithServer,
   updateRolePermissionsOnServer,
   updateUserOnServer,
@@ -72,6 +77,7 @@ export default function App() {
   const [csrfToken, setCsrfToken] = useState<string>('');
   const [currentUser, setCurrentUser] = useState<UserAccount | null>(null);
   const [dbState, setDbState] = useState<DatabaseState | null>(null);
+  const inFlightWritesRef = useRef<number>(0);
 
   // Navigation & UI State — default to 'inventory' so Products & Stock is immediately accessible
   const [activeTab, setActiveTab] = useState<ActiveTab>(() => {
@@ -141,7 +147,7 @@ export default function App() {
           result.currentUser || fallbackUser || result.state.users[0];
         const resolvedCsrf: string = result.csrfToken || fallbackCsrf || '';
         db.hydrateFromServer(result.state, resolvedUser);
-        setDbState(result.state);
+        setDbState({ ...result.state });
         setCurrentUser(resolvedUser);
         setCsrfToken(resolvedCsrf);
         setIsAuthenticated(true);
@@ -167,7 +173,7 @@ export default function App() {
         if (status.authenticated && status.user) {
           if (status.state) {
             db.hydrateFromServer(status.state, status.user);
-            setDbState(status.state);
+            setDbState({ ...status.state });
             setCurrentUser(status.user);
             setCsrfToken(status.csrfToken || '');
             setIsAuthenticated(true);
@@ -200,25 +206,170 @@ export default function App() {
     };
   }, [loadAuthenticatedState, normalizeBrowserRootUrl]);
 
-  // Synchronize state changes to protected server database
+  // Synchronize state changes to protected central server database and apply authoritative server result
   const syncStateToServer = useCallback(
-    async (updatedState: DatabaseState) => {
+    async (updatedState: DatabaseState, deletedIds?: string[]) => {
+      inFlightWritesRef.current += 1;
       try {
-        const res = await syncStateWithServer(updatedState, csrfToken);
+        const res = await syncStateWithServer(updatedState, csrfToken, {
+          deletedIds,
+        });
         if (!res.authenticated) {
           handleUnauthorizedSession(
             'Your session has expired or access was revoked. Please sign in again.'
           );
+          return;
+        }
+        if (res.csrfToken && res.csrfToken !== csrfToken) {
+          setCsrfToken(res.csrfToken);
+        }
+        if (res.state) {
+          db.hydrateFromServer(res.state, currentUser || undefined);
+          setDbState({ ...res.state });
+          if (selectedOrder) {
+            const refreshedOrder = res.state.orders.find((o) => o.id === selectedOrder.id);
+            setSelectedOrder(refreshedOrder || null);
+          }
         }
       } catch (err) {
         console.error('Failed to sync state to server:', err);
+      } finally {
+        inFlightWritesRef.current = Math.max(0, inFlightWritesRef.current - 1);
       }
     },
-    [csrfToken, handleUnauthorizedSession]
+    [csrfToken, currentUser, handleUnauthorizedSession, selectedOrder]
   );
 
+  // Automatic Cross-Tab & Cross-Browser / Multi-Device Synchronization
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    let cancelled = false;
+    let isPulling = false;
+
+    const pullLatestFromCentralServer = async (forceFullPull: boolean = false) => {
+      if (cancelled || isPulling || inFlightWritesRef.current > 0) return;
+      isPulling = true;
+      try {
+        if (!forceFullPull) {
+          const ver = await fetchServerVersion(csrfToken);
+          if (cancelled || inFlightWritesRef.current > 0) return;
+          if (!ver.authenticated) {
+            handleUnauthorizedSession(
+              'Your session has expired or access was revoked. Please sign in again.'
+            );
+            return;
+          }
+          if (!ver.reachable) return;
+          if (ver.csrfToken && ver.csrfToken !== csrfToken) {
+            setCsrfToken(ver.csrfToken);
+          }
+          const revChanged =
+            typeof ver.revision === 'number' && ver.revision > getLastKnownServerRevision();
+          const sigChanged =
+            Boolean(ver.signature) && ver.signature !== getLastKnownStateSignature();
+          if (!revChanged && !sigChanged) {
+            return;
+          }
+        }
+
+        const latest = await fetchAuthoritativeState(csrfToken);
+        if (cancelled || inFlightWritesRef.current > 0) return;
+        if (!latest.authenticated) {
+          handleUnauthorizedSession(
+            'Your session has expired or access was revoked. Please sign in again.'
+          );
+          return;
+        }
+        if (latest.csrfToken && latest.csrfToken !== csrfToken) {
+          setCsrfToken(latest.csrfToken);
+        }
+        if (latest.state) {
+          const resolvedUser = latest.currentUser || currentUser || latest.state.users[0];
+          db.hydrateFromServer(latest.state, resolvedUser);
+          setDbState({ ...latest.state });
+          if (latest.currentUser) {
+            setCurrentUser(latest.currentUser);
+          }
+        }
+      } catch {
+        // ignore transient background poll errors
+      } finally {
+        isPulling = false;
+      }
+    };
+
+    // 1. Instant cross-tab sync within the same browser via BroadcastChannel
+    let channel: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        channel = new BroadcastChannel(SYNC_BROADCAST_CHANNEL_NAME);
+        channel.onmessage = (event) => {
+          if (cancelled) return;
+          if (event.data?.type === 'logged_out') {
+            pullLatestFromCentralServer(true);
+          } else if (event.data?.type === 'state_updated') {
+            pullLatestFromCentralServer(true);
+          }
+        };
+      }
+    } catch {
+      // ignore BroadcastChannel setup issues
+    }
+
+    // 2. Cross-tab storage event listener
+    const handleStorageEvent = (e: StorageEvent) => {
+      if (cancelled) return;
+      if (e.key === SYNC_STORAGE_PING_KEY && e.newValue) {
+        pullLatestFromCentralServer(true);
+      }
+    };
+
+    // 3. Immediate sync when user focuses window or switches back to tab
+    const handleFocus = () => {
+      pullLatestFromCentralServer(false);
+    };
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        pullLatestFromCentralServer(false);
+      }
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('storage', handleStorageEvent);
+      window.addEventListener('focus', handleFocus);
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    // 4. Periodic 2-second version check for instant multi-browser / multi-device consistency
+    const intervalId = setInterval(() => {
+      pullLatestFromCentralServer(false);
+    }, 2000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(intervalId);
+      if (channel) {
+        try {
+          channel.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('storage', handleStorageEvent);
+        window.removeEventListener('focus', handleFocus);
+      }
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+    };
+  }, [isAuthenticated, csrfToken, currentUser, handleUnauthorizedSession]);
+
   const refreshState = useCallback(
-    (shouldSyncServer: boolean = true) => {
+    (shouldSyncServer: boolean = true, deletedIds?: string[]) => {
       const updated = db.getState();
       setDbState({ ...updated });
       if (selectedOrder) {
@@ -226,7 +377,7 @@ export default function App() {
         setSelectedOrder(refreshedOrder || null);
       }
       if (shouldSyncServer) {
-        syncStateToServer(updated);
+        syncStateToServer(updated, deletedIds);
       }
     },
     [selectedOrder, syncStateToServer]
@@ -244,7 +395,7 @@ export default function App() {
   // Operational Handlers
   const handleCreateOrder = (orderData: any) => {
     const res = db.createOrder(orderData);
-    refreshState();
+    refreshState(true);
     return res;
   };
 
@@ -259,7 +410,7 @@ export default function App() {
       ...params,
       performedBy: currentUser?.fullName || 'Admin',
     });
-    refreshState();
+    refreshState(true);
     return res;
   };
 
@@ -271,30 +422,30 @@ export default function App() {
         performedBy: currentUser?.fullName || 'Admin',
       });
     }
-    refreshState();
+    refreshState(true);
   };
 
   const handleSaveProduct = (productData: any) => {
     const saved = db.saveProduct(productData);
-    refreshState();
+    refreshState(true);
     return saved;
   };
 
   const handleDeleteProduct = (productId: string) => {
     const res = db.deleteProduct(productId);
-    refreshState();
+    refreshState(true, [productId]);
     return res;
   };
 
   const handleUpdateOrder = (orderId: string, updates: any) => {
     const res = db.updateOrder(orderId, updates);
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleDeleteOrder = (orderId: string) => {
     const res = db.deleteOrder(orderId);
-    refreshState();
+    refreshState(true, [orderId]);
     return res;
   };
 
@@ -303,37 +454,37 @@ export default function App() {
       ...params,
       performedBy: currentUser?.fullName || 'Admin',
     });
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleCreatePO = (poData: any) => {
     const res = db.createPurchaseOrder(poData);
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleDeletePO = (poId: string) => {
     const res = db.deletePurchaseOrder(poId);
-    refreshState();
+    refreshState(true, [poId]);
     return res;
   };
 
   const handleReceiveGoods = (poId: string) => {
     const res = db.receivePurchaseOrderGoods(poId);
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleSaveSupplier = (supData: any) => {
     const res = db.saveSupplier(supData);
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleDeleteSupplier = (supId: string) => {
     const res = db.deleteSupplier(supId);
-    refreshState();
+    refreshState(true, [supId]);
     return res;
   };
 
@@ -357,67 +508,67 @@ export default function App() {
       supplierId: input.supplierId,
       notes: input.notes,
     });
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleSaveCashTransaction = (txData: any) => {
     const res = db.saveCashTransaction(txData);
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleDeleteCashTransaction = (txId: string) => {
     const res = db.deleteCashTransaction(txId);
-    refreshState();
+    refreshState(true, [txId]);
     return res;
   };
 
   const handleSaveBankAccount = (accData: any) => {
     const res = db.saveBankAccount(accData);
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleDeleteBankAccount = (accId: string) => {
     const res = db.deleteBankAccount(accId);
-    refreshState();
+    refreshState(true, [accId]);
     return res;
   };
 
   const handleSettleParcels = (parcelIds: string[], bankAccountId: string, notes?: string) => {
     const res = db.settleParcels(parcelIds, bankAccountId, notes);
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleSaveAdExpense = (adData: any) => {
     const res = db.saveAdExpense(adData);
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleDeleteAdExpense = (adId: string) => {
     const res = db.deleteAdExpense(adId);
-    refreshState();
+    refreshState(true, [adId]);
     return res;
   };
 
   const handleSaveOperatingExpense = (expData: any) => {
     const res = db.saveOperatingExpense(expData);
-    refreshState();
+    refreshState(true);
     return res;
   };
 
   const handleDeleteOperatingExpense = (expId: string) => {
     const res = db.deleteOperatingExpense(expId);
-    refreshState();
+    refreshState(true, [expId]);
     return res;
   };
 
   const handleUpdateSettings = (newSettings: any) => {
     db.updateSettings(newSettings);
-    refreshState();
+    refreshState(true);
   };
 
   const handleExportBackup = () => {

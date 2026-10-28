@@ -564,6 +564,27 @@ export class ServerSessionStore {
     }
     return removed;
   }
+
+  public exportSessions(nowMs: number = Date.now()): ServerSessionRecord[] {
+    const active: ServerSessionRecord[] = [];
+    for (const [token, sess] of this.sessions.entries()) {
+      if (sess.expiresAt > nowMs) {
+        active.push({ ...sess });
+      } else {
+        this.sessions.delete(token);
+      }
+    }
+    return active;
+  }
+
+  public hydrateSessions(records: ServerSessionRecord[], nowMs: number = Date.now()): void {
+    if (!Array.isArray(records)) return;
+    for (const rec of records) {
+      if (rec && rec.token && rec.csrfToken && rec.userId && rec.expiresAt > nowMs) {
+        this.sessions.set(rec.token, { ...rec });
+      }
+    }
+  }
 }
 
 /**

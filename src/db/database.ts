@@ -1005,7 +1005,30 @@ export class DatabaseService {
     }
   }
 
+  public getRawSavedLocalState(): DatabaseState | null {
+    try {
+      const saved = this.getStorageItem(STORAGE_KEY);
+      if (!saved) return null;
+      const parsed = JSON.parse(saved);
+      if (parsed && typeof parsed === 'object') {
+        return parsed as DatabaseState;
+      }
+    } catch {
+      // ignore parse errors
+    }
+    return null;
+  }
+
   public hydrateFromServer(serverState: DatabaseState, authenticatedUser?: UserAccount): void {
+    try {
+      const existingRaw = this.getStorageItem(STORAGE_KEY);
+      if (existingRaw && !this.getStorageItem(`${STORAGE_KEY}_backup`)) {
+        this.setStorageItem(`${STORAGE_KEY}_backup`, existingRaw);
+      }
+    } catch {
+      // ignore backup write errors
+    }
+
     this.state = {
       ...this.state,
       ...serverState,
@@ -1013,6 +1036,8 @@ export class DatabaseService {
     if (authenticatedUser) {
       this.currentUserId = authenticatedUser.id;
     }
+    this.reconcileReservedStock();
+    this.saveToStorage();
   }
 
   public getSanitizedStateForClient(): DatabaseState {
@@ -1085,14 +1110,16 @@ export class DatabaseService {
     return INITIAL_USERS[0];
   }
 
-  public setCurrentUser(userId: string): { success: boolean; user?: UserAccount; error?: string } {
+  public setCurrentUser(userId: string, options?: { silent?: boolean }): { success: boolean; user?: UserAccount; error?: string } {
     const target = this.state.users.find((u) => u.id === userId);
     if (!target) return { success: false, error: 'User account not found.' };
     if (!target.isActive) return { success: false, error: `Account "${target.username}" is currently deactivated.` };
     this.currentUserId = target.id;
-    target.lastLoginAt = new Date().toISOString();
-    this.logAudit('USER_SWITCH_SESSION', 'User', target.id, `Switched active session to ${target.fullName} (@${target.username}, role: ${target.role})`, target.fullName, 'users');
-    this.saveToStorage();
+    if (!options?.silent) {
+      target.lastLoginAt = new Date().toISOString();
+      this.logAudit('USER_SWITCH_SESSION', 'User', target.id, `Switched active session to ${target.fullName} (@${target.username}, role: ${target.role})`, target.fullName, 'users');
+      this.saveToStorage();
+    }
     return { success: true, user: target };
   }
 
