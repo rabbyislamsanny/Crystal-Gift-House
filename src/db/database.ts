@@ -18,6 +18,8 @@ import {
   ReturnDisposition,
   TrashItem,
   TrashEntityType,
+  CashTransaction,
+  CashTransactionType,
 } from '../types/database';
 import {
   calculateAvailableStock,
@@ -52,6 +54,89 @@ export const INITIAL_BANK_ACCOUNTS: BankCashAccount[] = [
   { id: 'acc-2', accountName: 'Nagad Business', accountNumber: '01712345678', balance: 41200, accountType: 'mfs' },
   { id: 'acc-3', accountName: 'Bank Asia (Current)', accountNumber: '123-01-0987654', balance: 250000, accountType: 'bank' },
   { id: 'acc-4', accountName: 'Cash in Hand (Counter)', accountNumber: 'CASH-01', balance: 28400, accountType: 'cash' },
+];
+
+export const INITIAL_CASH_TRANSACTIONS: CashTransaction[] = [
+  {
+    id: 'ctx-1',
+    transactionNumber: 'TXN-2026-001',
+    date: '2026-10-01',
+    type: 'cash_in',
+    category: 'Capital / Owner Deposit',
+    amount: 250000,
+    accountId: 'acc-3',
+    accountName: 'Bank Asia (Current)',
+    balanceBefore: 0,
+    balanceAfter: 250000,
+    reference: 'DEP-OCT-01',
+    partyName: 'Owner Capital Injection',
+    notes: 'Opening business capital deposit into Bank Asia corporate account.',
+    createdAt: '2026-10-01T09:00:00Z',
+  },
+  {
+    id: 'ctx-2',
+    transactionNumber: 'TXN-2026-002',
+    date: '2026-10-10',
+    type: 'cash_out',
+    category: 'Supplier Payment',
+    amount: 15000,
+    accountId: 'acc-1',
+    accountName: 'bKash Merchant',
+    balanceBefore: 99500,
+    balanceAfter: 84500,
+    reference: 'SUP-PAY-88',
+    partyName: 'Haji Mohammad Rafiq',
+    notes: 'Partial payment for custom velvet gift boxes and wooden LED bases.',
+    createdAt: '2026-10-10T14:30:00Z',
+  },
+  {
+    id: 'ctx-3',
+    transactionNumber: 'TXN-2026-003',
+    date: '2026-10-18',
+    type: 'cash_in',
+    category: 'Order Advance / Sales Collection',
+    amount: 200,
+    accountId: 'acc-1',
+    accountName: 'bKash Merchant',
+    balanceBefore: 84300,
+    balanceAfter: 84500,
+    reference: 'CGH-202610-001',
+    partyName: 'Tanvir Hossain',
+    notes: 'Advance delivery fee received via bKash for Order CGH-202610-001.',
+    createdAt: '2026-10-18T11:00:00Z',
+  },
+  {
+    id: 'ctx-4',
+    transactionNumber: 'TXN-2026-004',
+    date: '2026-10-21',
+    type: 'cash_in',
+    category: 'Courier COD Settlement',
+    amount: 1590,
+    accountId: 'acc-1',
+    accountName: 'bKash Merchant',
+    balanceBefore: 82910,
+    balanceAfter: 84500,
+    reference: 'ST-902188',
+    partyName: 'Steadfast Courier',
+    notes: 'COD payout received for Order CGH-202610-001 after courier fee deduction.',
+    createdAt: '2026-10-21T16:00:00Z',
+  },
+  {
+    id: 'ctx-5',
+    transactionNumber: 'TXN-2026-005',
+    date: '2026-10-24',
+    type: 'cash_out',
+    category: 'Owner Withdrawal / Drawings',
+    amount: 5000,
+    accountId: 'acc-4',
+    accountName: 'Cash in Hand (Counter)',
+    balanceBefore: 33400,
+    balanceAfter: 28400,
+    reference: 'DRAW-OCT-01',
+    partyName: 'Owner Personal Withdrawal',
+    notes: 'Cash withdrawn from counter drawer for owner personal use.',
+    createdAt: '2026-10-24T19:00:00Z',
+  },
 ];
 
 export const INITIAL_SUPPLIERS: Supplier[] = [
@@ -622,6 +707,7 @@ export function getDefaultState(): DatabaseState {
     operatingExpenses: JSON.parse(JSON.stringify(INITIAL_OPERATING_EXPENSES)),
     courierSettlements: [],
     bankAccounts: JSON.parse(JSON.stringify(INITIAL_BANK_ACCOUNTS)),
+    cashTransactions: JSON.parse(JSON.stringify(INITIAL_CASH_TRANSACTIONS)),
     auditLogs: JSON.parse(JSON.stringify(INITIAL_AUDIT_LOGS)),
     trash: [],
     settings: { ...INITIAL_SETTINGS },
@@ -691,6 +777,7 @@ class DatabaseService {
           operatingExpenses: parsed.operatingExpenses || INITIAL_OPERATING_EXPENSES,
           courierSettlements: parsed.courierSettlements || [],
           bankAccounts: parsed.bankAccounts || INITIAL_BANK_ACCOUNTS,
+          cashTransactions: parsed.cashTransactions || INITIAL_CASH_TRANSACTIONS,
           auditLogs: parsed.auditLogs || INITIAL_AUDIT_LOGS,
           trash: parsed.trash || [],
           settings: { ...INITIAL_SETTINGS, ...(parsed.settings || {}) },
@@ -1966,6 +2053,7 @@ class DatabaseService {
     const netSettled = totalCollected - totalCourierFees;
 
     const bank = this.state.bankAccounts.find((b) => b.id === bankAccountId);
+    const balanceBefore = bank ? bank.balance : 0;
     if (bank) {
       bank.balance += netSettled;
     }
@@ -1983,6 +2071,27 @@ class DatabaseService {
       notes: notes || `Settled ${settledParcels.length} parcels via courier disbursement.`,
       createdAt: new Date().toISOString(),
     };
+
+    if (bank && netSettled > 0) {
+      if (!this.state.cashTransactions) this.state.cashTransactions = [];
+      const cashTx: CashTransaction = {
+        id: 'ctx-' + Date.now(),
+        transactionNumber: 'TXN-' + new Date().getFullYear() + '-' + String(this.state.cashTransactions.length + 1).padStart(3, '0'),
+        date: settlement.date,
+        type: 'cash_in',
+        category: 'Courier COD Settlement',
+        amount: netSettled,
+        accountId: bank.id,
+        accountName: bank.accountName,
+        balanceBefore,
+        balanceAfter: bank.balance,
+        reference: settlement.settlementNumber,
+        partyName: settlement.courierName,
+        notes: settlement.notes,
+        createdAt: new Date().toISOString(),
+      };
+      this.state.cashTransactions.unshift(cashTx);
+    }
 
     this.state.courierSettlements.unshift(settlement);
     this.logAudit('SETTLE_PARCELS', 'CourierSettlement', settlement.id, `Settled ৳${netSettled} into ${bank ? bank.accountName : 'Bank'}`);
@@ -2211,6 +2320,208 @@ class DatabaseService {
     return { success: true, deletedCount };
   }
 
+  // --- CASH IN / CASH OUT & BANK ACCOUNTS ---
+  public getCashTransactions(): CashTransaction[] {
+    return [...(this.state.cashTransactions || [])];
+  }
+
+  public getBankAccounts(): BankCashAccount[] {
+    return [...this.state.bankAccounts];
+  }
+
+  public saveBankAccount(input: {
+    id?: string;
+    accountName: string;
+    accountNumber: string;
+    balance: number;
+    accountType: 'bank' | 'mfs' | 'cash';
+  }): BankCashAccount {
+    const existingIdx = input.id ? this.state.bankAccounts.findIndex((a) => a.id === input.id) : -1;
+    if (existingIdx >= 0) {
+      const prevBalance = this.state.bankAccounts[existingIdx].balance;
+      const updatedAcc: BankCashAccount = {
+        ...this.state.bankAccounts[existingIdx],
+        accountName: input.accountName.trim(),
+        accountNumber: input.accountNumber.trim(),
+        balance: Number(input.balance) || 0,
+        accountType: input.accountType,
+      };
+      this.state.bankAccounts[existingIdx] = updatedAcc;
+      this.logAudit(
+        'UPDATE_BANK_ACCOUNT',
+        'BankCashAccount',
+        updatedAcc.id,
+        `Updated account "${updatedAcc.accountName}" (Balance: ৳${prevBalance} → ৳${updatedAcc.balance})`
+      );
+      this.saveToStorage();
+      return updatedAcc;
+    }
+
+    const newAcc: BankCashAccount = {
+      id: 'acc-' + Date.now(),
+      accountName: input.accountName.trim(),
+      accountNumber: input.accountNumber.trim(),
+      balance: Number(input.balance) || 0,
+      accountType: input.accountType,
+    };
+    this.state.bankAccounts.push(newAcc);
+    this.logAudit('CREATE_BANK_ACCOUNT', 'BankCashAccount', newAcc.id, `Added ${newAcc.accountType.toUpperCase()} account "${newAcc.accountName}" with opening balance ৳${newAcc.balance}`);
+    this.saveToStorage();
+    return newAcc;
+  }
+
+  public deleteBankAccount(accountId: string): { success: boolean; error?: string } {
+    if (this.state.bankAccounts.length <= 1) {
+      return { success: false, error: 'Cannot delete the last remaining cash/bank account.' };
+    }
+    const acc = this.state.bankAccounts.find((a) => a.id === accountId);
+    if (!acc) return { success: false, error: 'Account not found.' };
+    this.state.bankAccounts = this.state.bankAccounts.filter((a) => a.id !== accountId);
+    this.logAudit('DELETE_BANK_ACCOUNT', 'BankCashAccount', accountId, `Removed account "${acc.accountName}" (Balance was ৳${acc.balance})`);
+    this.saveToStorage();
+    return { success: true };
+  }
+
+  public saveCashTransaction(input: {
+    id?: string;
+    date: string;
+    type: CashTransactionType;
+    category: string;
+    amount: number;
+    accountId: string;
+    reference?: string;
+    partyName?: string;
+    supplierId?: string;
+    notes?: string;
+  }): { success: boolean; transaction?: CashTransaction; error?: string } {
+    if (!this.state.cashTransactions) this.state.cashTransactions = [];
+    const amount = Math.round((Number(input.amount) || 0) * 100) / 100;
+    if (amount <= 0) {
+      return { success: false, error: 'Transaction amount must be greater than 0.' };
+    }
+
+    const targetAccount = this.state.bankAccounts.find((a) => a.id === input.accountId);
+    if (!targetAccount) {
+      return { success: false, error: 'Selected cash/bank account not found.' };
+    }
+
+    const existingIdx = input.id ? this.state.cashTransactions.findIndex((t) => t.id === input.id) : -1;
+
+    if (existingIdx >= 0) {
+      const oldTx = this.state.cashTransactions[existingIdx];
+      // 1. Reverse old transaction effect on its account
+      const oldAccount = this.state.bankAccounts.find((a) => a.id === oldTx.accountId);
+      if (oldAccount) {
+        if (oldTx.type === 'cash_in') {
+          oldAccount.balance -= oldTx.amount;
+        } else {
+          oldAccount.balance += oldTx.amount;
+        }
+      }
+
+      // 2. Apply new transaction effect on targetAccount
+      const balanceBefore = targetAccount.balance;
+      const balanceAfter = input.type === 'cash_in' ? balanceBefore + amount : balanceBefore - amount;
+      targetAccount.balance = balanceAfter;
+
+      const updatedTx: CashTransaction = {
+        ...oldTx,
+        date: input.date || new Date().toISOString().split('T')[0],
+        type: input.type,
+        category: input.category.trim() || (input.type === 'cash_in' ? 'Cash In' : 'Cash Out'),
+        amount,
+        accountId: targetAccount.id,
+        accountName: targetAccount.accountName,
+        balanceBefore,
+        balanceAfter,
+        reference: input.reference?.trim() || '',
+        partyName: input.partyName?.trim() || '',
+        notes: input.notes?.trim() || '',
+      };
+
+      this.state.cashTransactions[existingIdx] = updatedTx;
+      this.logAudit(
+        'UPDATE_CASH_TRANSACTION',
+        'CashTransaction',
+        updatedTx.id,
+        `Updated ${updatedTx.type === 'cash_in' ? 'Cash In' : 'Cash Out'} ${updatedTx.transactionNumber}: ৳${updatedTx.amount} (${updatedTx.category}) on ${updatedTx.accountName}`
+      );
+      this.saveToStorage();
+      return { success: true, transaction: updatedTx };
+    }
+
+    // Creating a new Cash In / Cash Out transaction
+    const balanceBefore = targetAccount.balance;
+    const balanceAfter = input.type === 'cash_in' ? balanceBefore + amount : balanceBefore - amount;
+    targetAccount.balance = balanceAfter;
+
+    // If linked to a supplier for Supplier Payment, reduce supplier payable balance
+    if (input.supplierId && input.type === 'cash_out') {
+      const sup = this.state.suppliers.find((s) => s.id === input.supplierId);
+      if (sup) {
+        sup.currentBalance = Math.max(0, sup.currentBalance - amount);
+      }
+    }
+
+    const newTx: CashTransaction = {
+      id: 'ctx-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
+      transactionNumber: 'TXN-' + new Date().getFullYear() + '-' + String(this.state.cashTransactions.length + 1).padStart(3, '0'),
+      date: input.date || new Date().toISOString().split('T')[0],
+      type: input.type,
+      category: input.category.trim() || (input.type === 'cash_in' ? 'Cash In' : 'Cash Out'),
+      amount,
+      accountId: targetAccount.id,
+      accountName: targetAccount.accountName,
+      balanceBefore,
+      balanceAfter,
+      reference: input.reference?.trim() || '',
+      partyName: input.partyName?.trim() || '',
+      notes: input.notes?.trim() || '',
+      createdAt: new Date().toISOString(),
+    };
+
+    this.state.cashTransactions.unshift(newTx);
+    this.logAudit(
+      input.type === 'cash_in' ? 'CASH_IN' : 'CASH_OUT',
+      'CashTransaction',
+      newTx.id,
+      `${input.type === 'cash_in' ? 'Received' : 'Withdrew'} ৳${newTx.amount} (${newTx.category}) via ${newTx.accountName}. Balance: ৳${balanceBefore} → ৳${balanceAfter}`
+    );
+    this.saveToStorage();
+    return { success: true, transaction: newTx };
+  }
+
+  public deleteCashTransaction(txId: string, reason?: string): { success: boolean; error?: string } {
+    if (!this.state.cashTransactions) this.state.cashTransactions = [];
+    const tx = this.state.cashTransactions.find((t) => t.id === txId);
+    if (!tx) return { success: false, error: 'Transaction not found.' };
+
+    // Reverse balance effect on the linked account
+    const acc = this.state.bankAccounts.find((a) => a.id === tx.accountId);
+    if (acc) {
+      if (tx.type === 'cash_in') {
+        acc.balance -= tx.amount;
+      } else {
+        acc.balance += tx.amount;
+      }
+    }
+
+    const consequence = `Deleted ${tx.type === 'cash_in' ? 'Cash In' : 'Cash Out'} ${tx.transactionNumber} (৳${tx.amount} • ${tx.category}) and reversed ৳${tx.amount} on ${acc?.accountName || tx.accountName}.`;
+    this.addToTrash({
+      entityType: 'CashTransaction',
+      entityId: tx.id,
+      entityName: `${tx.transactionNumber} (${tx.type === 'cash_in' ? '+৳' : '-৳'}${tx.amount} • ${tx.category})`,
+      consequencesSummary: consequence,
+      payload: tx,
+      reason,
+    });
+
+    this.state.cashTransactions = this.state.cashTransactions.filter((t) => t.id !== txId);
+    this.logAudit('DELETE_CASH_TRANSACTION', 'CashTransaction', txId, consequence);
+    this.saveToStorage();
+    return { success: true };
+  }
+
   // --- TRASH / RECENTLY DELETED & RESTORE ---
   public getTrash(): TrashItem[] {
     return [...(this.state.trash || [])];
@@ -2352,6 +2663,22 @@ class DatabaseService {
         }
         break;
       }
+      case 'CashTransaction': {
+        const tx = payload as CashTransaction;
+        if (!this.state.cashTransactions) this.state.cashTransactions = [];
+        if (!this.state.cashTransactions.some((t) => t.id === tx.id)) {
+          this.state.cashTransactions.unshift(tx);
+          const acc = this.state.bankAccounts.find((a) => a.id === tx.accountId);
+          if (acc) {
+            if (tx.type === 'cash_in') {
+              acc.balance += tx.amount;
+            } else {
+              acc.balance -= tx.amount;
+            }
+          }
+        }
+        break;
+      }
     }
 
     this.state.trash.splice(idx, 1);
@@ -2460,6 +2787,7 @@ class DatabaseService {
         operatingExpenses: data.operatingExpenses || [],
         courierSettlements: data.courierSettlements || [],
         bankAccounts: data.bankAccounts || INITIAL_BANK_ACCOUNTS,
+        cashTransactions: data.cashTransactions || INITIAL_CASH_TRANSACTIONS,
         auditLogs: data.auditLogs || [],
         trash: data.trash || [],
         settings: { ...INITIAL_SETTINGS, ...(data.settings || {}) },

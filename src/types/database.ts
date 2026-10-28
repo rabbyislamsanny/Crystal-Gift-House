@@ -306,6 +306,25 @@ export interface AppSettings {
   timezone: string;
 }
 
+export type CashTransactionType = 'cash_in' | 'cash_out';
+
+export interface CashTransaction {
+  id: string;
+  transactionNumber: string;
+  date: string;
+  type: CashTransactionType;
+  category: string;
+  amount: number;
+  accountId: string;
+  accountName: string;
+  balanceBefore: number;
+  balanceAfter: number;
+  reference?: string;
+  partyName?: string;
+  notes?: string;
+  createdAt: string;
+}
+
 export type TrashEntityType =
   | 'Product'
   | 'Order'
@@ -316,7 +335,8 @@ export type TrashEntityType =
   | 'OperatingExpense'
   | 'CourierSettlement'
   | 'Customer'
-  | 'StockMovement';
+  | 'StockMovement'
+  | 'CashTransaction';
 
 export interface TrashItem {
   id: string;
@@ -343,8 +363,10 @@ export interface DatabaseState {
   operatingExpenses: OperatingExpense[];
   courierSettlements: CourierSettlement[];
   bankAccounts: BankCashAccount[];
+  cashTransactions: CashTransaction[];
   auditLogs: AuditLog[];
   trash: TrashItem[];
   settings: AppSettings;
 }
+
 

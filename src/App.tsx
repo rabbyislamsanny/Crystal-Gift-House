@@ -122,6 +122,12 @@ export default function App() {
     return res;
   };
 
+  const handleDeletePO = (poId: string) => {
+    const res = db.deletePurchaseOrder(poId);
+    refreshState();
+    return res;
+  };
+
   const handleReceiveGoods = (poId: string) => {
     const res = db.receivePurchaseOrderGoods(poId);
     refreshState();
@@ -130,6 +136,60 @@ export default function App() {
 
   const handleSaveSupplier = (supData: any) => {
     const res = db.saveSupplier(supData);
+    refreshState();
+    return res;
+  };
+
+  const handleDeleteSupplier = (supId: string) => {
+    const res = db.deleteSupplier(supId);
+    refreshState();
+    return res;
+  };
+
+  const handleRecordSupplierPayment = (input: {
+    supplierId: string;
+    supplierName: string;
+    amount: number;
+    accountId: string;
+    date: string;
+    reference?: string;
+    notes?: string;
+  }) => {
+    const res = db.saveCashTransaction({
+      date: input.date,
+      type: 'cash_out',
+      category: 'Supplier Payment',
+      amount: input.amount,
+      accountId: input.accountId,
+      reference: input.reference,
+      partyName: input.supplierName,
+      supplierId: input.supplierId,
+      notes: input.notes,
+    });
+    refreshState();
+    return res;
+  };
+
+  const handleSaveCashTransaction = (txData: any) => {
+    const res = db.saveCashTransaction(txData);
+    refreshState();
+    return res;
+  };
+
+  const handleDeleteCashTransaction = (txId: string) => {
+    const res = db.deleteCashTransaction(txId);
+    refreshState();
+    return res;
+  };
+
+  const handleSaveBankAccount = (accData: any) => {
+    const res = db.saveBankAccount(accData);
+    refreshState();
+    return res;
+  };
+
+  const handleDeleteBankAccount = (accId: string) => {
+    const res = db.deleteBankAccount(accId);
     refreshState();
     return res;
   };
@@ -283,9 +343,13 @@ export default function App() {
               purchases={dbState.purchaseOrders}
               suppliers={dbState.suppliers}
               products={dbState.products}
+              bankAccounts={dbState.bankAccounts}
               onCreatePO={handleCreatePO}
+              onDeletePO={handleDeletePO}
               onReceiveGoods={handleReceiveGoods}
               onSaveSupplier={handleSaveSupplier}
+              onDeleteSupplier={handleDeleteSupplier}
+              onRecordSupplierPayment={handleRecordSupplierPayment}
             />
           )}
 
@@ -322,8 +386,13 @@ export default function App() {
               adExpenses={dbState.adExpenses}
               operatingExpenses={dbState.operatingExpenses}
               bankAccounts={dbState.bankAccounts}
+              cashTransactions={dbState.cashTransactions}
               suppliers={dbState.suppliers}
               products={dbState.products}
+              onSaveCashTransaction={handleSaveCashTransaction}
+              onDeleteCashTransaction={handleDeleteCashTransaction}
+              onSaveBankAccount={handleSaveBankAccount}
+              onDeleteBankAccount={handleDeleteBankAccount}
             />
           )}
 
