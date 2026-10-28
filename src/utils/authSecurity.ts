@@ -1,0 +1,320 @@
+import {
+  AppModule,
+  PermissionAction,
+  RolePermissionMap,
+  UserAccount,
+  UserRole,
+} from '../types/database';
+
+export const ALL_MODULES: AppModule[] = [
+  'dashboard',
+  'orders',
+  'ai_order_entry',
+  'inventory',
+  'purchases',
+  'couriers',
+  'expenses',
+  'accounting',
+  'customers',
+  'reports',
+  'users',
+  'audit_logs',
+  'settings',
+];
+
+export const ALL_ACTIONS: PermissionAction[] = [
+  'view',
+  'create',
+  'edit',
+  'delete',
+  'export',
+  'approve',
+];
+
+export const ROLE_LABELS: Record<UserRole, { name: string; bangla: string; badgeClass: string; description: string }> = {
+  super_admin: {
+    name: 'Super Admin',
+    bangla: 'সুপার অ্যাডমিন',
+    badgeClass: 'bg-emerald-900 text-amber-300 border-emerald-700',
+    description: 'Full unrestricted access to all modules, security settings, and Super Admin accounts.',
+  },
+  admin: {
+    name: 'Admin',
+    bangla: 'অ্যাডমিন',
+    badgeClass: 'bg-emerald-100 text-emerald-900 border-emerald-300',
+    description: 'Configurable administrative access across operations, staff users, and reports.',
+  },
+  order_manager: {
+    name: 'Order Manager',
+    bangla: 'অর্ডার ম্যানেজার',
+    badgeClass: 'bg-blue-100 text-blue-900 border-blue-300',
+    description: 'Manages manual orders, AI order entry, customer records, and courier dispatches.',
+  },
+  inventory_manager: {
+    name: 'Inventory Manager',
+    bangla: 'ইনভেন্টরি ম্যানেজার',
+    badgeClass: 'bg-amber-100 text-amber-900 border-amber-300',
+    description: 'Manages product catalogue, stock adjustments, purchase orders, and suppliers.',
+  },
+  accountant: {
+    name: 'Accountant',
+    bangla: 'অ্যাকাউন্ট্যান্ট',
+    badgeClass: 'bg-purple-100 text-purple-900 border-purple-300',
+    description: 'Manages Cash In/Out ledger, courier settlements, ad spend, operating expenses, and P&L.',
+  },
+  staff: {
+    name: 'Staff',
+    bangla: 'স্টাফ',
+    badgeClass: 'bg-slate-100 text-slate-800 border-slate-300',
+    description: 'Creates draft orders and uses AI Order Entry; cannot delete records or view sensitive financials.',
+  },
+};
+
+export function getDefaultRolePermissions(): RolePermissionMap {
+  const fullModuleMap = (): Record<AppModule, PermissionAction[]> => {
+    const map = {} as Record<AppModule, PermissionAction[]>;
+    for (const mod of ALL_MODULES) {
+      map[mod] = [...ALL_ACTIONS];
+    }
+    return map;
+  };
+
+  return {
+    super_admin: fullModuleMap(),
+    admin: {
+      dashboard: ['view', 'export'],
+      orders: ['view', 'create', 'edit', 'delete', 'export', 'approve'],
+      ai_order_entry: ['view', 'create', 'edit', 'approve'],
+      inventory: ['view', 'create', 'edit', 'delete', 'export', 'approve'],
+      purchases: ['view', 'create', 'edit', 'delete', 'export', 'approve'],
+      couriers: ['view', 'create', 'edit', 'delete', 'export', 'approve'],
+      expenses: ['view', 'create', 'edit', 'delete', 'export', 'approve'],
+      accounting: ['view', 'create', 'edit', 'export', 'approve'],
+      customers: ['view', 'create', 'edit', 'delete', 'export'],
+      reports: ['view', 'export'],
+      users: ['view', 'create', 'edit'],
+      audit_logs: ['view', 'export'],
+      settings: ['view', 'edit', 'export'],
+    },
+    order_manager: {
+      dashboard: ['view'],
+      orders: ['view', 'create', 'edit', 'export', 'approve'],
+      ai_order_entry: ['view', 'create', 'edit', 'approve'],
+      inventory: ['view'],
+      purchases: [],
+      couriers: ['view', 'create', 'edit', 'export'],
+      expenses: [],
+      accounting: [],
+      customers: ['view', 'create', 'edit', 'export'],
+      reports: ['view', 'export'],
+      users: [],
+      audit_logs: ['view'],
+      settings: [],
+    },
+    inventory_manager: {
+      dashboard: ['view'],
+      orders: ['view'],
+      ai_order_entry: [],
+      inventory: ['view', 'create', 'edit', 'export', 'approve'],
+      purchases: ['view', 'create', 'edit', 'export', 'approve'],
+      couriers: ['view'],
+      expenses: [],
+      accounting: [],
+      customers: [],
+      reports: ['view', 'export'],
+      users: [],
+      audit_logs: ['view'],
+      settings: [],
+    },
+    accountant: {
+      dashboard: ['view', 'export'],
+      orders: ['view', 'export'],
+      ai_order_entry: [],
+      inventory: ['view', 'export'],
+      purchases: ['view', 'create', 'edit', 'export', 'approve'],
+      couriers: ['view', 'edit', 'export', 'approve'],
+      expenses: ['view', 'create', 'edit', 'export', 'approve'],
+      accounting: ['view', 'create', 'edit', 'export', 'approve'],
+      customers: ['view'],
+      reports: ['view', 'export'],
+      users: [],
+      audit_logs: ['view', 'export'],
+      settings: [],
+    },
+    staff: {
+      dashboard: ['view'],
+      orders: ['view', 'create', 'edit'],
+      ai_order_entry: ['view', 'create', 'edit'],
+      inventory: ['view'],
+      purchases: [],
+      couriers: ['view'],
+      expenses: [],
+      accounting: [],
+      customers: ['view', 'create'],
+      reports: [],
+      users: [],
+      audit_logs: [],
+      settings: [],
+    },
+  };
+}
+
+/**
+ * Generates a cryptographic-style random salt string.
+ */
+export function generateSalt(length: number = 16): string {
+  const chars = 'abcdef0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  let salt = 'cgh_s1_';
+  for (let i = 0; i < length; i++) {
+    salt += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return salt;
+}
+
+/**
+ * Deterministic multi-round salted password key derivation (portable across browser & Node).
+ * Never stores or returns plain-text passwords.
+ */
+export function hashPasswordSync(password: string, salt: string): string {
+  if (!password) throw new Error('Password cannot be empty');
+  const pepper = 'CrystalGiftHouse_BD_OS_v2_Pepper_9981';
+  const input = `${salt}:${password}:${pepper}`;
+
+  // 8x 32-bit state words (256-bit output) with 1,024 mixing rounds
+  const state = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ];
+
+  for (let round = 0; round < 1024; round++) {
+    for (let i = 0; i < input.length; i++) {
+      const code = input.charCodeAt(i);
+      const idx = (i + round) & 7;
+      let val = state[idx] ^ (code + round * 31 + i * 17);
+      val = Math.imul(val ^ (val >>> 15), 0x85ebca6b);
+      val = Math.imul(val ^ (val >>> 13), 0xc2b2ae35);
+      state[idx] = (val ^ (val >>> 16)) >>> 0;
+      state[(idx + 1) & 7] = (state[(idx + 1) & 7] + state[idx]) >>> 0;
+    }
+  }
+
+  return 'pbkdf2_cgh$' + state.map((w) => w.toString(16).padStart(8, '0')).join('');
+}
+
+/**
+ * Constant-time verification of password against stored salt and hash.
+ */
+export function verifyPasswordSync(password: string, salt: string, expectedHash: string): boolean {
+  if (!password || !salt || !expectedHash) return false;
+  const computed = hashPasswordSync(password, salt);
+  if (computed.length !== expectedHash.length) return false;
+  let diff = 0;
+  for (let i = 0; i < computed.length; i++) {
+    diff |= computed.charCodeAt(i) ^ expectedHash.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+/**
+ * Checks whether a user has a specific permission on a module.
+ */
+export function hasPermission(
+  user: Pick<UserAccount, 'role' | 'isActive' | 'customPermissions'> | null | undefined,
+  rolePermissions: RolePermissionMap,
+  module: AppModule,
+  action: PermissionAction
+): boolean {
+  if (!user || !user.isActive) return false;
+  if (user.role === 'super_admin') return true;
+
+  if (user.customPermissions && user.customPermissions[module]) {
+    return user.customPermissions[module]!.includes(action);
+  }
+
+  const roleMap = rolePermissions[user.role];
+  if (!roleMap) return false;
+  const allowedActions = roleMap[module] || [];
+  return allowedActions.includes(action);
+}
+
+/**
+ * Checks if targetUserId is the last active Super Admin in the system.
+ */
+export function isLastActiveSuperAdmin(
+  targetUserId: string,
+  allUsers: Array<Pick<UserAccount, 'id' | 'role' | 'isActive'>>
+): boolean {
+  const target = allUsers.find((u) => u.id === targetUserId);
+  if (!target || target.role !== 'super_admin' || !target.isActive) {
+    return false;
+  }
+  const activeSuperAdmins = allUsers.filter((u) => u.role === 'super_admin' && u.isActive);
+  return activeSuperAdmins.length <= 1;
+}
+
+/**
+ * Validates whether an actor can perform a sensitive operation on a target user.
+ */
+export function validateUserModification(params: {
+  actor: Pick<UserAccount, 'id' | 'role' | 'isActive' | 'customPermissions'>;
+  rolePermissions: RolePermissionMap;
+  targetUser: Pick<UserAccount, 'id' | 'username' | 'role' | 'isActive'>;
+  allUsers: Array<Pick<UserAccount, 'id' | 'role' | 'isActive'>>;
+  operation: 'deactivate' | 'delete' | 'change_role' | 'edit' | 'reset_password' | 'revoke';
+  newRole?: UserRole;
+}): { allowed: boolean; error?: string } {
+  const { actor, rolePermissions, targetUser, allUsers, operation, newRole } = params;
+
+  if (!actor || !actor.isActive) {
+    return { allowed: false, error: 'Unauthorized: Actor account is inactive or not logged in.' };
+  }
+
+  const requiredAction: PermissionAction = operation === 'delete' ? 'delete' : 'edit';
+  if (!hasPermission(actor, rolePermissions, 'users', requiredAction)) {
+    return {
+      allowed: false,
+      error: `Access denied: Role "${actor.role}" does not have "${requiredAction}" permission on User Management.`,
+    };
+  }
+
+  // Only a Super Admin can modify or delete another Super Admin
+  if (targetUser.role === 'super_admin' && actor.role !== 'super_admin') {
+    return {
+      allowed: false,
+      error: 'Access denied: Only a Super Admin can modify or manage another Super Admin account.',
+    };
+  }
+
+  if (newRole === 'super_admin' && actor.role !== 'super_admin') {
+    return {
+      allowed: false,
+      error: 'Access denied: Only a Super Admin can promote a user to Super Admin.',
+    };
+  }
+
+  // Protect the last active Super Admin from being deactivated, deleted, or demoted
+  if (
+    operation === 'deactivate' ||
+    operation === 'delete' ||
+    (operation === 'change_role' && newRole && newRole !== 'super_admin')
+  ) {
+    if (isLastActiveSuperAdmin(targetUser.id, allUsers)) {
+      return {
+        allowed: false,
+        error: `Security rule violation: Cannot ${operation.replace('_', ' ')} "${targetUser.username}" because they are the last active Super Admin.`,
+      };
+    }
+  }
+
+  return { allowed: true };
+}
+
+/**
+ * Sanitizes audit log details to ensure plain-text passwords, PINs, or tokens are never logged.
+ */
+export function sanitizeAuditDetails(details: string): string {
+  if (!details) return '';
+  return details
+    .replace(/(password|passwd|pwd|pin|secret|token|apiKey)\s*[:=]\s*["']?[^\s,;)"']+["']?/gi, '$1: [REDACTED]')
+    .replace(/pbkdf2_cgh\$[0-9a-f]+/gi, '[HASH_REDACTED]');
+}

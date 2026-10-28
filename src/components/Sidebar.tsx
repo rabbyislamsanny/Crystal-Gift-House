@@ -13,10 +13,15 @@ import {
   ShoppingBag,
   X,
   Sparkles,
+  Users,
+  Wand2,
 } from 'lucide-react';
+import { AppModule, RolePermissionMap, UserAccount } from '../types/database';
+import { hasPermission, ROLE_LABELS } from '../utils/authSecurity';
 
 export type ActiveTab =
   | 'dashboard'
+  | 'ai_order_entry'
   | 'orders'
   | 'inventory'
   | 'purchases'
@@ -25,6 +30,7 @@ export type ActiveTab =
   | 'expenses'
   | 'accounting'
   | 'reports'
+  | 'users'
   | 'settings';
 
 interface SidebarProps {
@@ -36,6 +42,8 @@ interface SidebarProps {
   pendingOrdersCount: number;
   pendingParcelsCount: number;
   onOpenAcceptanceTests: () => void;
+  currentUser?: UserAccount;
+  rolePermissions?: RolePermissionMap;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -47,11 +55,37 @@ export const Sidebar: React.FC<SidebarProps> = ({
   pendingOrdersCount,
   pendingParcelsCount,
   onOpenAcceptanceTests,
+  currentUser,
+  rolePermissions,
 }) => {
-  const navItems = [
-    { id: 'dashboard' as ActiveTab, label: 'Dashboard', bangla: 'ড্যাশবোর্ড', icon: LayoutDashboard },
+  const navItems: Array<{
+    id: ActiveTab;
+    module: AppModule;
+    label: string;
+    bangla: string;
+    icon: any;
+    badge?: string | number;
+    badgeColor?: string;
+  }> = [
     {
-      id: 'orders' as ActiveTab,
+      id: 'dashboard',
+      module: 'dashboard',
+      label: 'Dashboard',
+      bangla: 'ড্যাশবোর্ড',
+      icon: LayoutDashboard,
+    },
+    {
+      id: 'ai_order_entry',
+      module: 'ai_order_entry',
+      label: 'AI Order Entry',
+      bangla: 'এআই অটো অর্ডার এন্ট্রি',
+      icon: Wand2,
+      badge: 'AI',
+      badgeColor: 'bg-amber-400 text-slate-950 font-bold',
+    },
+    {
+      id: 'orders',
+      module: 'orders',
       label: 'Orders',
       bangla: 'অর্ডার ম্যানেজমেন্ট',
       icon: ShoppingCart,
@@ -59,28 +93,80 @@ export const Sidebar: React.FC<SidebarProps> = ({
       badgeColor: 'bg-emerald-500 text-white',
     },
     {
-      id: 'inventory' as ActiveTab,
+      id: 'inventory',
+      module: 'inventory',
       label: 'Products & Stock',
       bangla: 'পণ্য ও স্টক',
       icon: Boxes,
       badge: lowStockCount > 0 ? lowStockCount : undefined,
       badgeColor: 'bg-amber-500 text-slate-900 font-bold',
     },
-    { id: 'purchases' as ActiveTab, label: 'Purchases & Suppliers', bangla: 'ক্রয় ও সরবরাহকারী', icon: ShoppingBag },
     {
-      id: 'parcels' as ActiveTab,
+      id: 'purchases',
+      module: 'purchases',
+      label: 'Purchases & Suppliers',
+      bangla: 'ক্রয় ও সরবরাহকারী',
+      icon: ShoppingBag,
+    },
+    {
+      id: 'parcels',
+      module: 'couriers',
       label: 'Parcels & Courier',
       bangla: 'পার্সেল ও কুরিয়ার',
       icon: Truck,
       badge: pendingParcelsCount > 0 ? pendingParcelsCount : undefined,
       badgeColor: 'bg-blue-500 text-white',
     },
-    { id: 'advertising' as ActiveTab, label: 'Meta Ads & Spend', bangla: 'বিজ্ঞাপন খরচ', icon: TrendingUp },
-    { id: 'expenses' as ActiveTab, label: 'Operating Expenses', bangla: 'অন্যান্য খরচ', icon: Receipt },
-    { id: 'accounting' as ActiveTab, label: 'Accounting & P&L', bangla: 'হিসাব ও লাভ-ক্ষতি', icon: DollarSign },
-    { id: 'reports' as ActiveTab, label: 'Reports & Export', bangla: 'রিপোর্ট ও অ্যানালিটিক্স', icon: BarChart3 },
-    { id: 'settings' as ActiveTab, label: 'Settings & Backup', bangla: 'সেটিংস ও ব্যাকআপ', icon: Settings },
+    {
+      id: 'advertising',
+      module: 'expenses',
+      label: 'Meta Ads & Spend',
+      bangla: 'বিজ্ঞাপন খরচ',
+      icon: TrendingUp,
+    },
+    {
+      id: 'expenses',
+      module: 'expenses',
+      label: 'Operating Expenses',
+      bangla: 'অন্যান্য খরচ',
+      icon: Receipt,
+    },
+    {
+      id: 'accounting',
+      module: 'accounting',
+      label: 'Accounting & P&L',
+      bangla: 'হিসাব ও লাভ-ক্ষতি',
+      icon: DollarSign,
+    },
+    {
+      id: 'reports',
+      module: 'reports',
+      label: 'Reports & Export',
+      bangla: 'রিপোর্ট ও অ্যানালিটিক্স',
+      icon: BarChart3,
+    },
+    {
+      id: 'users',
+      module: 'users',
+      label: 'Users & Roles (RBAC)',
+      bangla: 'ইউজার ও পারমিশন',
+      icon: Users,
+    },
+    {
+      id: 'settings',
+      module: 'settings',
+      label: 'Settings & Backup',
+      bangla: 'সেটিংস ও ব্যাকআপ',
+      icon: Settings,
+    },
   ];
+
+  const visibleItems = navItems.filter((item) => {
+    if (!currentUser || !rolePermissions) return true;
+    // Always show Users & Roles tab so users can switch/login or inspect their role
+    if (item.id === 'users') return true;
+    return hasPermission(currentUser, rolePermissions, item.module, 'view');
+  });
 
   return (
     <>
@@ -101,7 +187,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="flex items-center justify-between h-16 px-4 bg-emerald-950 border-b border-emerald-900/60">
           <div className="flex items-center gap-3">
             <div className="flex items-center justify-center w-9 h-9 rounded-lg bg-emerald-500/20 border border-emerald-400/30 text-emerald-300">
-              <Sparkles className="w-5 h-5 text-amber-300 animate-pulse" />
+              <Sparkles className="w-5 h-5 text-amber-300" />
             </div>
             <div>
               <h1 className="text-sm font-bold tracking-tight text-white flex items-center gap-1.5">
@@ -121,20 +207,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
           </button>
         </div>
 
-        {/* Currency & Business Badge */}
+        {/* Currency & Role Badge */}
         <div className="px-4 py-2.5 bg-slate-900/90 border-b border-slate-800 flex items-center justify-between text-xs text-slate-400">
           <span className="flex items-center gap-1 font-medium text-amber-400">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block animate-ping mr-0.5"></span>
+            <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block mr-0.5"></span>
             BDT (৳) • Asia/Dhaka
           </span>
           <span className="text-[10px] uppercase font-mono px-1.5 py-0.5 rounded bg-slate-800 text-emerald-400 font-semibold border border-emerald-500/20">
-            PROD
+            {currentUser ? ROLE_LABELS[currentUser.role].name : 'PROD'}
           </span>
         </div>
 
         {/* Navigation items */}
         <nav className="flex-1 px-3 py-3 space-y-1 overflow-y-auto" aria-label="Main Navigation">
-          {navItems.map((item) => {
+          {visibleItems.map((item) => {
             const Icon = item.icon;
             const isActive = activeTab === item.id;
             return (

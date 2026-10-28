@@ -106,3 +106,87 @@ test('Supplier CRUD (add, edit, delete) and Cash In / Cash Out accounting with b
   assert.equal(db.getSuppliers().some((s) => s.id === updatedSup.id), false);
 });
 
+test('Multi-user management, password hashing, RBAC enforcement, and AI order creation with stock accuracy', () => {
+  db.resetToDemo();
+
+  // 1. Authenticate Super Admin via email and username
+  const authByEmail = db.authenticateUser('mdrabbyislamsanny1@gmail.com', 'Admin2026@#');
+  assert.equal(authByEmail.success, true);
+  assert.equal(authByEmail.user?.role, 'super_admin');
+  assert.equal(authByEmail.user?.email, 'mdrabbyislamsanny1@gmail.com');
+
+  const authRes = db.authenticateUser('admin', 'Admin2026@#');
+  assert.equal(authRes.success, true);
+  assert.equal(authRes.user?.role, 'super_admin');
+
+  // 2. Prevent deleting or deactivating the last active Super Admin
+  const delLastSuper = db.deleteUser('user-1');
+  assert.equal(delLastSuper.success, false);
+  assert.ok(delLastSuper.error?.includes('last active Super Admin'));
+
+  const revokeLastSuper = db.revokeUserAccess('user-1');
+  assert.equal(revokeLastSuper.success, false);
+
+  // 3. Create a new Order Manager user and verify unique username & hashed password
+  const createUserRes = db.createUser({
+    username: 'mahmud_om',
+    fullName: 'Mahmudul Hasan',
+    email: 'mahmud@crystalgifthouse.com.bd',
+    phone: '01755667788',
+    role: 'order_manager',
+    passwordPlain: 'SecurePass#99',
+  });
+  assert.equal(createUserRes.success, true);
+  assert.notEqual(createUserRes.user?.passwordHash, 'SecurePass#99');
+
+  // Duplicate username must fail
+  const dupUserRes = db.createUser({
+    username: 'mahmud_om',
+    fullName: 'Duplicate User',
+    email: 'dup@cgh.com.bd',
+    phone: '01700000000',
+    role: 'staff',
+    passwordPlain: 'Pass1234',
+  });
+  assert.equal(dupUserRes.success, false);
+
+  // 4. Reset password and authenticate with new password
+  const resetRes = db.resetUserPassword(createUserRes.user!.id, 'NewPass@456');
+  assert.equal(resetRes.success, true);
+  assert.equal(db.authenticateUser('mahmud_om', 'SecurePass#99').success, false);
+  assert.equal(db.authenticateUser('mahmud_om', 'NewPass@456').success, true);
+
+  // 5. Create an AI Auto Entry order with initialStatus = 'confirmed' and verify stock reservation & audit log
+  const islamicBallBefore = db.getProducts().find((p) => p.sku === 'CGH-ISLAMIC-BALL')!;
+  assert.equal(islamicBallBefore.reservedStock, 0);
+
+  const aiOrderRes = db.createOrder({
+    customerName: 'Rahim Uddin',
+    customerPhone: '01712345678',
+    fullAddress: 'House 12, Savar, Dhaka',
+    district: 'Dhaka',
+    deliveryZone: 'inside_dhaka',
+    items: [{ productId: islamicBallBefore.id, quantity: 2, unitPrice: 650 }],
+    discount: 0,
+    deliveryFeeCharged: 80,
+    advancePaid: 0,
+    paymentMethod: 'Cash on Delivery',
+    courierName: 'Steadfast',
+    sourceChannel: 'AI Auto Entry',
+    initialStatus: 'confirmed',
+    entryMethod: 'ai_auto',
+    notes: 'Call before delivery.',
+  });
+
+  assert.equal(aiOrderRes.success, true);
+  assert.equal(aiOrderRes.order?.itemTotal, 1300);
+  assert.equal(aiOrderRes.order?.codAmount, 1380);
+  assert.equal(aiOrderRes.order?.createdByName, 'Mahmudul Hasan');
+
+  const islamicBallAfter = db.getProducts().find((p) => p.sku === 'CGH-ISLAMIC-BALL')!;
+  assert.equal(islamicBallAfter.reservedStock, 2, 'Stock must be reserved exactly once');
+
+  // Switch back to Super Admin and reset to clean demo state
+  db.setCurrentUser('user-1');
+  db.resetToDemo();
+});

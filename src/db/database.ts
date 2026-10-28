@@ -20,6 +20,12 @@ import {
   TrashEntityType,
   CashTransaction,
   CashTransactionType,
+  UserAccount,
+  UserRole,
+  AppModule,
+  PermissionAction,
+  RolePermissionMap,
+  AuthSession,
 } from '../types/database';
 import {
   calculateAvailableStock,
@@ -30,14 +36,116 @@ import {
   inspectAndProcessReturn,
 } from '../utils/stockCalculations';
 import { allocateAdExpenseEvenly } from '../utils/accountingCalculations';
+import {
+  generateSalt,
+  getDefaultRolePermissions,
+  hashPasswordSync,
+  verifyPasswordSync,
+  hasPermission,
+  validateUserModification,
+  sanitizeAuditDetails,
+} from '../utils/authSecurity';
 
 const STORAGE_KEY = 'cgh_business_os_db_v1';
+
+export const INITIAL_USERS: UserAccount[] = [
+  {
+    id: 'user-1',
+    username: 'admin',
+    fullName: 'Md. Rabby Islam Sanny',
+    email: 'mdrabbyislamsanny1@gmail.com',
+    phone: '01819234567',
+    role: 'super_admin',
+    passwordSalt: 'cgh_s1_superadmin01',
+    passwordHash: hashPasswordSync('Admin2026@#', 'cgh_s1_superadmin01'),
+    isActive: true,
+    sessionVersion: 1,
+    lastLoginAt: '2026-10-28T07:00:00Z',
+    createdAt: '2026-09-01T08:00:00Z',
+    updatedAt: '2026-10-28T07:00:00Z',
+  },
+  {
+    id: 'user-2',
+    username: 'rafiq',
+    fullName: 'Rafiqul Hasan',
+    email: 'rafiq@crystalgifthouse.com.bd',
+    phone: '01711889922',
+    role: 'admin',
+    passwordSalt: 'cgh_s1_admin02',
+    passwordHash: hashPasswordSync('Manager@123', 'cgh_s1_admin02'),
+    isActive: true,
+    sessionVersion: 1,
+    lastLoginAt: '2026-10-27T18:30:00Z',
+    createdAt: '2026-09-05T09:00:00Z',
+    updatedAt: '2026-10-27T18:30:00Z',
+  },
+  {
+    id: 'user-3',
+    username: 'nusrat',
+    fullName: 'Nusrat Jahan',
+    email: 'nusrat@crystalgifthouse.com.bd',
+    phone: '01911223344',
+    role: 'order_manager',
+    passwordSalt: 'cgh_s1_orders03',
+    passwordHash: hashPasswordSync('Order@123', 'cgh_s1_orders03'),
+    isActive: true,
+    sessionVersion: 1,
+    lastLoginAt: '2026-10-28T06:45:00Z',
+    createdAt: '2026-09-10T10:00:00Z',
+    updatedAt: '2026-10-28T06:45:00Z',
+  },
+  {
+    id: 'user-4',
+    username: 'kamal',
+    fullName: 'Kamal Hossain',
+    email: 'kamal@crystalgifthouse.com.bd',
+    phone: '01611445566',
+    role: 'inventory_manager',
+    passwordSalt: 'cgh_s1_stock04',
+    passwordHash: hashPasswordSync('Stock@123', 'cgh_s1_stock04'),
+    isActive: true,
+    sessionVersion: 1,
+    lastLoginAt: '2026-10-26T15:20:00Z',
+    createdAt: '2026-09-12T10:00:00Z',
+    updatedAt: '2026-10-26T15:20:00Z',
+  },
+  {
+    id: 'user-5',
+    username: 'farhan',
+    fullName: 'Farhan Ahmed',
+    email: 'farhan@crystalgifthouse.com.bd',
+    phone: '01511778899',
+    role: 'accountant',
+    passwordSalt: 'cgh_s1_acct05',
+    passwordHash: hashPasswordSync('Account@123', 'cgh_s1_acct05'),
+    isActive: true,
+    sessionVersion: 1,
+    lastLoginAt: '2026-10-27T11:10:00Z',
+    createdAt: '2026-09-15T10:00:00Z',
+    updatedAt: '2026-10-27T11:10:00Z',
+  },
+  {
+    id: 'user-6',
+    username: 'sakib',
+    fullName: 'Sakib Al Mahmud',
+    email: 'sakib@crystalgifthouse.com.bd',
+    phone: '01311990011',
+    role: 'staff',
+    passwordSalt: 'cgh_s1_staff06',
+    passwordHash: hashPasswordSync('Staff@123', 'cgh_s1_staff06'),
+    isActive: true,
+    sessionVersion: 1,
+    lastLoginAt: '2026-10-28T05:15:00Z',
+    createdAt: '2026-09-20T10:00:00Z',
+    updatedAt: '2026-10-28T05:15:00Z',
+  },
+];
 
 export const INITIAL_SETTINGS: AppSettings = {
   businessName: 'Crystal Gift House',
   banglaBusinessName: 'ক্রিস্টাল গিফট হাউস',
   phone: '01819234567',
-  email: 'info@crystalgifthouse.com.bd',
+  email: 'mdrabbyislamsanny1@gmail.com',
   address: 'Shop 42, Level 3, New Market, Dhaka-1205',
   currency: 'BDT',
   currencySymbol: '৳',
@@ -168,6 +276,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sku: 'CGH-LOTUS-3D',
     name: '3D Crystal Lotus Flower LED Lamp',
     banglaName: '৩ডি ক্রিস্টাল পদ্মফুল এলইডি বাতি',
+    aliases: ['Crystal Lotus', 'Lotus Lamp', 'পদ্মফুল বাতি', 'ক্রিস্টাল পদ্মফুল', '3D Lotus'],
     category: 'Table Lamps',
     supplierId: 'sup-1',
     supplierName: 'Zhejiang Crystal Arts Ltd',
@@ -188,6 +297,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sku: 'CGH-CUBE-LASER',
     name: 'Custom 3D Laser Engraved Crystal Cube (Large)',
     banglaName: 'কাস্টম ৩ডি লেজার খোদাইকৃত ক্রিস্টাল কিউব',
+    aliases: ['Crystal Cube', 'Laser Cube', '3D Photo Cube', 'ক্রিস্টাল কিউব', 'ছবি কিউব'],
     category: 'Personalized Gifts',
     supplierId: 'sup-1',
     supplierName: 'Zhejiang Crystal Arts Ltd',
@@ -208,6 +318,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sku: 'CGH-MOON-BALL',
     name: 'Galaxy & Solar System Crystal Ball Night Light',
     banglaName: 'গ্যালাক্সি ক্রিস্টাল বল নাইট লাইট',
+    aliases: ['Galaxy Crystal Ball', 'Moon Ball', 'Solar System Ball', 'গ্যালাক্সি বল', 'ক্রিস্টাল বল'],
     category: 'Night Lights',
     supplierId: 'sup-1',
     supplierName: 'Zhejiang Crystal Arts Ltd',
@@ -228,6 +339,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sku: 'CGH-SWAN-PAIR',
     name: 'Royal Crystal Swan Couple Romantic Showpiece',
     banglaName: 'রয়্যাল ক্রিস্টাল রাজহাঁস জুটি শো-পিস',
+    aliases: ['Crystal Swan', 'Swan Couple', 'রাজহাঁস শো-পিস', 'Swan Showpiece'],
     category: 'Showpieces',
     supplierId: 'sup-2',
     supplierName: 'Haji Mohammad Rafiq',
@@ -248,6 +360,7 @@ export const INITIAL_PRODUCTS: Product[] = [
     sku: 'CGH-TROPHY-01',
     name: 'Octagonal Beveled Crystal Award Plaque',
     banglaName: 'অষ্টভুজ বেভেল্ড ক্রিস্টাল অ্যাওয়ার্ড ট্রফি',
+    aliases: ['Crystal Trophy', 'Award Plaque', 'ক্রিস্টাল ক্রেস্ট', 'ট্রফি'],
     category: 'Corporate Awards',
     supplierId: 'sup-2',
     supplierName: 'Haji Mohammad Rafiq',
@@ -262,6 +375,33 @@ export const INITIAL_PRODUCTS: Product[] = [
     notes: 'Low stock warning! Corporate annual award season.',
     createdAt: '2026-09-20T15:00:00Z',
     updatedAt: '2026-10-25T15:00:00Z',
+  },
+  {
+    id: 'prod-6',
+    sku: 'CGH-ISLAMIC-BALL',
+    name: 'Islamic Crystal Ball',
+    banglaName: 'ইসলামিক ক্রিস্টাল বল নাইট ল্যাম্প',
+    aliases: [
+      'Islamic Crystal Ball',
+      'Ayatul Kursi Crystal Ball',
+      'Kaaba Crystal Ball',
+      'ইসলামিক ক্রিস্টাল বল',
+      'আয়াতুল কুরসি ক্রিস্টাল বল',
+    ],
+    category: 'Night Lights',
+    supplierId: 'sup-1',
+    supplierName: 'Zhejiang Crystal Arts Ltd',
+    purchaseCost: 320,
+    sellingPrice: 650,
+    openingStock: 40,
+    currentStock: 35,
+    reservedStock: 0,
+    lowStockThreshold: 6,
+    packagingCost: 30,
+    damagedStock: 0,
+    notes: '3D laser engraved Islamic calligraphy & Kaaba K9 crystal ball with warm LED wooden base.',
+    createdAt: '2026-09-22T10:00:00Z',
+    updatedAt: '2026-10-26T10:00:00Z',
   },
 ];
 
@@ -710,6 +850,8 @@ export function getDefaultState(): DatabaseState {
     cashTransactions: JSON.parse(JSON.stringify(INITIAL_CASH_TRANSACTIONS)),
     auditLogs: JSON.parse(JSON.stringify(INITIAL_AUDIT_LOGS)),
     trash: [],
+    users: JSON.parse(JSON.stringify(INITIAL_USERS)),
+    rolePermissions: getDefaultRolePermissions(),
     settings: { ...INITIAL_SETTINGS },
   };
 }
@@ -717,10 +859,38 @@ export function getDefaultState(): DatabaseState {
 class DatabaseService {
   private state: DatabaseState;
   private memoryStorage: Record<string, string> = {};
+  private currentUserId: string = 'user-1';
 
   constructor() {
     this.state = this.loadFromStorage();
+    this.ensureCatalogueAndUsersUpToDate();
     this.reconcileReservedStock();
+  }
+
+  private ensureCatalogueAndUsersUpToDate(): void {
+    let changed = false;
+    if (!this.state.users || this.state.users.length === 0) {
+      this.state.users = JSON.parse(JSON.stringify(INITIAL_USERS));
+      changed = true;
+    }
+    if (!this.state.rolePermissions) {
+      this.state.rolePermissions = getDefaultRolePermissions();
+      changed = true;
+    }
+    // Ensure prod-6 (Islamic Crystal Ball) and product aliases exist even when loading older localStorage snapshots
+    for (const initProd of INITIAL_PRODUCTS) {
+      const existing = this.state.products.find((p) => p.id === initProd.id || p.sku === initProd.sku);
+      if (!existing && initProd.id === 'prod-6') {
+        this.state.products.push(JSON.parse(JSON.stringify(initProd)));
+        changed = true;
+      } else if (existing && !existing.aliases && initProd.aliases) {
+        existing.aliases = [...initProd.aliases];
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.saveToStorage();
+    }
   }
 
   private reconcileReservedStock(): void {
@@ -765,6 +935,23 @@ class DatabaseService {
       const saved = this.getStorageItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
+        const loadedUsers: UserAccount[] =
+          parsed.users && parsed.users.length > 0
+            ? parsed.users.map((u: UserAccount) => {
+                if (u.id === 'user-1' && u.email === 'tariqul@crystalgifthouse.com.bd') {
+                  const salt = u.passwordSalt || 'cgh_s1_superadmin01';
+                  return {
+                    ...u,
+                    fullName: 'Md. Rabby Islam Sanny',
+                    email: 'mdrabbyislamsanny1@gmail.com',
+                    passwordSalt: salt,
+                    passwordHash: hashPasswordSync('Admin2026@#', salt),
+                  };
+                }
+                return u;
+              })
+            : JSON.parse(JSON.stringify(INITIAL_USERS));
+
         return {
           products: parsed.products || INITIAL_PRODUCTS,
           suppliers: parsed.suppliers || INITIAL_SUPPLIERS,
@@ -780,6 +967,8 @@ class DatabaseService {
           cashTransactions: parsed.cashTransactions || INITIAL_CASH_TRANSACTIONS,
           auditLogs: parsed.auditLogs || INITIAL_AUDIT_LOGS,
           trash: parsed.trash || [],
+          users: loadedUsers,
+          rolePermissions: parsed.rolePermissions || getDefaultRolePermissions(),
           settings: { ...INITIAL_SETTINGS, ...(parsed.settings || {}) },
         };
       }
@@ -801,15 +990,370 @@ class DatabaseService {
     return { ...this.state };
   }
 
-  public logAudit(action: string, entity: string, entityId: string, details: string, performedBy: string = 'Admin') {
+  public getCurrentUser(): UserAccount {
+    const found = this.state.users.find((u) => u.id === this.currentUserId && u.isActive);
+    if (found) return found;
+    const fallback = this.state.users.find((u) => u.role === 'super_admin' && u.isActive) || this.state.users[0];
+    this.currentUserId = fallback.id;
+    return fallback;
+  }
+
+  public setCurrentUser(userId: string): { success: boolean; user?: UserAccount; error?: string } {
+    const target = this.state.users.find((u) => u.id === userId);
+    if (!target) return { success: false, error: 'User account not found.' };
+    if (!target.isActive) return { success: false, error: `Account "${target.username}" is currently deactivated.` };
+    this.currentUserId = target.id;
+    target.lastLoginAt = new Date().toISOString();
+    this.logAudit('USER_SWITCH_SESSION', 'User', target.id, `Switched active session to ${target.fullName} (@${target.username}, role: ${target.role})`, target.fullName, 'users');
+    this.saveToStorage();
+    return { success: true, user: target };
+  }
+
+  public authenticateUser(usernameOrEmail: string, passwordPlain: string): {
+    success: boolean;
+    user?: UserAccount;
+    session?: AuthSession;
+    error?: string;
+  } {
+    const cleanLogin = (usernameOrEmail || '').trim().toLowerCase();
+    const user = this.state.users.find(
+      (u) => u.username.toLowerCase() === cleanLogin || u.email.toLowerCase() === cleanLogin
+    );
+    if (!user) {
+      this.logAudit('AUTH_FAILED', 'User', 'UNKNOWN', `Failed login attempt for unknown username "${cleanLogin}"`, 'Anonymous', 'users');
+      return { success: false, error: 'Invalid username or password.' };
+    }
+    if (!user.isActive) {
+      this.logAudit('AUTH_BLOCKED', 'User', user.id, `Blocked login attempt for deactivated user @${user.username}`, user.fullName, 'users');
+      return { success: false, error: 'Account is deactivated or access has been revoked. Contact Super Admin.' };
+    }
+    const valid = verifyPasswordSync(passwordPlain, user.passwordSalt, user.passwordHash);
+    if (!valid) {
+      this.logAudit('AUTH_FAILED', 'User', user.id, `Failed password verification for user @${user.username}`, user.fullName, 'users');
+      return { success: false, error: 'Invalid username or password.' };
+    }
+
+    this.currentUserId = user.id;
+    const now = new Date();
+    user.lastLoginAt = now.toISOString();
+    const session: AuthSession = {
+      token: `cgh_sess_${user.id}_v${user.sessionVersion}_${Date.now()}`,
+      userId: user.id,
+      username: user.username,
+      fullName: user.fullName,
+      role: user.role,
+      sessionVersion: user.sessionVersion,
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 12 * 3600 * 1000).toISOString(),
+    };
+    this.logAudit('USER_LOGIN', 'User', user.id, `User ${user.fullName} (@${user.username}) authenticated successfully`, user.fullName, 'users');
+    this.saveToStorage();
+    return { success: true, user, session };
+  }
+
+  public checkPermission(module: AppModule, action: PermissionAction, actorOverride?: UserAccount): boolean {
+    const actor = actorOverride || this.getCurrentUser();
+    return hasPermission(actor, this.state.rolePermissions, module, action);
+  }
+
+  // --- USER MANAGEMENT & RBAC ---
+  public getUsers(): UserAccount[] {
+    return [...this.state.users];
+  }
+
+  public createUser(input: {
+    username: string;
+    fullName: string;
+    email: string;
+    phone: string;
+    role: UserRole;
+    passwordPlain: string;
+    isActive?: boolean;
+    customPermissions?: Partial<Record<AppModule, PermissionAction[]>>;
+  }): { success: boolean; user?: UserAccount; error?: string } {
+    const actor = this.getCurrentUser();
+    if (!this.checkPermission('users', 'create', actor)) {
+      return { success: false, error: `Access denied: Role "${actor.role}" cannot create user accounts.` };
+    }
+    if (input.role === 'super_admin' && actor.role !== 'super_admin') {
+      return { success: false, error: 'Access denied: Only a Super Admin can create another Super Admin account.' };
+    }
+
+    const cleanUsername = (input.username || '').trim().toLowerCase();
+    if (!cleanUsername || cleanUsername.length < 3) {
+      return { success: false, error: 'Username must be at least 3 characters.' };
+    }
+    if (this.state.users.some((u) => u.username.toLowerCase() === cleanUsername)) {
+      return { success: false, error: `Username "${cleanUsername}" is already taken. Each user needs a unique login.` };
+    }
+    if (!input.passwordPlain || input.passwordPlain.length < 6) {
+      return { success: false, error: 'Password must be at least 6 characters.' };
+    }
+
+    const salt = generateSalt();
+    const passwordHash = hashPasswordSync(input.passwordPlain, salt);
+    const now = new Date().toISOString();
+
+    const newUser: UserAccount = {
+      id: 'user-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5),
+      username: cleanUsername,
+      fullName: (input.fullName || cleanUsername).trim(),
+      email: (input.email || `${cleanUsername}@crystalgifthouse.com.bd`).trim(),
+      phone: (input.phone || '').trim(),
+      role: input.role,
+      passwordSalt: salt,
+      passwordHash,
+      isActive: input.isActive ?? true,
+      customPermissions: input.customPermissions,
+      sessionVersion: 1,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    this.state.users.push(newUser);
+    this.logAudit(
+      'CREATE_USER',
+      'User',
+      newUser.id,
+      `Created user ${newUser.fullName} (@${newUser.username}) with role ${newUser.role}`,
+      actor.fullName,
+      'users'
+    );
+    this.saveToStorage();
+    return { success: true, user: newUser };
+  }
+
+  public updateUser(
+    userId: string,
+    updates: {
+      fullName?: string;
+      email?: string;
+      phone?: string;
+      role?: UserRole;
+      isActive?: boolean;
+      customPermissions?: Partial<Record<AppModule, PermissionAction[]>>;
+    }
+  ): { success: boolean; user?: UserAccount; error?: string } {
+    const actor = this.getCurrentUser();
+    const target = this.state.users.find((u) => u.id === userId);
+    if (!target) return { success: false, error: 'User not found.' };
+
+    if (updates.role && updates.role !== target.role) {
+      const check = validateUserModification({
+        actor,
+        rolePermissions: this.state.rolePermissions,
+        targetUser: target,
+        allUsers: this.state.users,
+        operation: 'change_role',
+        newRole: updates.role,
+      });
+      if (!check.allowed) return { success: false, error: check.error };
+    }
+
+    if (updates.isActive === false && target.isActive) {
+      const check = validateUserModification({
+        actor,
+        rolePermissions: this.state.rolePermissions,
+        targetUser: target,
+        allUsers: this.state.users,
+        operation: 'deactivate',
+      });
+      if (!check.allowed) return { success: false, error: check.error };
+    }
+
+    const editCheck = validateUserModification({
+      actor,
+      rolePermissions: this.state.rolePermissions,
+      targetUser: target,
+      allUsers: this.state.users,
+      operation: 'edit',
+    });
+    if (!editCheck.allowed) return { success: false, error: editCheck.error };
+
+    const prevRole = target.role;
+    if (updates.fullName !== undefined) target.fullName = updates.fullName.trim();
+    if (updates.email !== undefined) target.email = updates.email.trim();
+    if (updates.phone !== undefined) target.phone = updates.phone.trim();
+    if (updates.role !== undefined) target.role = updates.role;
+    if (updates.isActive !== undefined) target.isActive = updates.isActive;
+    if (updates.customPermissions !== undefined) target.customPermissions = updates.customPermissions;
+    target.updatedAt = new Date().toISOString();
+
+    this.logAudit(
+      'UPDATE_USER',
+      'User',
+      target.id,
+      `Updated user @${target.username} (${target.fullName}): role ${prevRole} -> ${target.role}, active=${target.isActive}`,
+      actor.fullName,
+      'users'
+    );
+    this.saveToStorage();
+    return { success: true, user: target };
+  }
+
+  public toggleUserActive(userId: string, isActive: boolean): { success: boolean; user?: UserAccount; error?: string } {
+    return this.updateUser(userId, { isActive });
+  }
+
+  public resetUserPassword(userId: string, newPasswordPlain: string): { success: boolean; error?: string } {
+    const actor = this.getCurrentUser();
+    const target = this.state.users.find((u) => u.id === userId);
+    if (!target) return { success: false, error: 'User not found.' };
+
+    const check = validateUserModification({
+      actor,
+      rolePermissions: this.state.rolePermissions,
+      targetUser: target,
+      allUsers: this.state.users,
+      operation: 'reset_password',
+    });
+    if (!check.allowed) return { success: false, error: check.error };
+
+    if (!newPasswordPlain || newPasswordPlain.length < 6) {
+      return { success: false, error: 'New password must be at least 6 characters.' };
+    }
+
+    const newSalt = generateSalt();
+    target.passwordSalt = newSalt;
+    target.passwordHash = hashPasswordSync(newPasswordPlain, newSalt);
+    target.sessionVersion = (target.sessionVersion || 1) + 1;
+    target.updatedAt = new Date().toISOString();
+
+    this.logAudit(
+      'RESET_USER_PASSWORD',
+      'User',
+      target.id,
+      `Reset password and rotated session key for @${target.username} (${target.fullName})`,
+      actor.fullName,
+      'users'
+    );
+    this.saveToStorage();
+    return { success: true };
+  }
+
+  public revokeUserAccess(userId: string, reason?: string): { success: boolean; error?: string } {
+    const actor = this.getCurrentUser();
+    const target = this.state.users.find((u) => u.id === userId);
+    if (!target) return { success: false, error: 'User not found.' };
+
+    const check = validateUserModification({
+      actor,
+      rolePermissions: this.state.rolePermissions,
+      targetUser: target,
+      allUsers: this.state.users,
+      operation: 'deactivate',
+    });
+    if (!check.allowed) return { success: false, error: check.error };
+
+    const now = new Date().toISOString();
+    target.isActive = false;
+    target.revokedAt = now;
+    target.sessionVersion = (target.sessionVersion || 1) + 1;
+    target.updatedAt = now;
+
+    if (this.currentUserId === target.id) {
+      const superAdmin = this.state.users.find((u) => u.role === 'super_admin' && u.isActive);
+      if (superAdmin) this.currentUserId = superAdmin.id;
+    }
+
+    this.logAudit(
+      'REVOKE_USER_ACCESS',
+      'User',
+      target.id,
+      `Revoked access & invalidated active sessions for @${target.username} (${target.fullName}). Reason: ${reason || 'Security revocation'}`,
+      actor.fullName,
+      'users'
+    );
+    this.saveToStorage();
+    return { success: true };
+  }
+
+  public deleteUser(userId: string, reason?: string): { success: boolean; error?: string } {
+    const actor = this.getCurrentUser();
+    const target = this.state.users.find((u) => u.id === userId);
+    if (!target) return { success: false, error: 'User not found.' };
+
+    const check = validateUserModification({
+      actor,
+      rolePermissions: this.state.rolePermissions,
+      targetUser: target,
+      allUsers: this.state.users,
+      operation: 'delete',
+    });
+    if (!check.allowed) return { success: false, error: check.error };
+
+    this.addToTrash({
+      entityType: 'User',
+      entityId: target.id,
+      entityName: `${target.fullName} (@${target.username} • ${target.role})`,
+      consequencesSummary: `Moved user account @${target.username} (${target.role}) to Trash. Historical orders & audit trail preserved.`,
+      payload: target,
+      reason,
+    });
+
+    this.state.users = this.state.users.filter((u) => u.id !== userId);
+    if (this.currentUserId === userId) {
+      const superAdmin = this.state.users.find((u) => u.role === 'super_admin' && u.isActive) || this.state.users[0];
+      if (superAdmin) this.currentUserId = superAdmin.id;
+    }
+
+    this.logAudit(
+      'DELETE_USER',
+      'User',
+      userId,
+      `Deleted user account @${target.username} (${target.fullName}, role: ${target.role}) to Trash.`,
+      actor.fullName,
+      'users'
+    );
+    this.saveToStorage();
+    return { success: true };
+  }
+
+  public updateRolePermissions(
+    role: UserRole,
+    modulePermissions: Record<AppModule, PermissionAction[]>
+  ): { success: boolean; error?: string } {
+    const actor = this.getCurrentUser();
+    if (!this.checkPermission('users', 'edit', actor)) {
+      return { success: false, error: 'Access denied: You do not have permission to edit role permissions.' };
+    }
+    if (role === 'super_admin') {
+      return { success: false, error: 'Super Admin always retains full access across all modules.' };
+    }
+
+    this.state.rolePermissions[role] = { ...modulePermissions };
+    this.logAudit(
+      'UPDATE_ROLE_PERMISSIONS',
+      'RolePermissions',
+      role,
+      `Updated module permission matrix for role "${role}"`,
+      actor.fullName,
+      'users'
+    );
+    this.saveToStorage();
+    return { success: true };
+  }
+
+  public logAudit(
+    action: string,
+    entity: string,
+    entityId: string,
+    details: string,
+    performedBy?: string,
+    module?: AppModule
+  ) {
+    const actor = this.state?.users?.find((u) => u.id === this.currentUserId);
     const log: AuditLog = {
       id: 'log-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
       timestamp: new Date().toISOString(),
       action,
       entity,
       entityId,
-      details,
-      performedBy,
+      details: sanitizeAuditDetails(details),
+      performedBy: performedBy || actor?.fullName || 'Admin',
+      userId: actor?.id,
+      userRole: actor?.role,
+      module,
     };
     this.state.auditLogs = [log, ...this.state.auditLogs].slice(0, 500);
     this.saveToStorage();
@@ -824,14 +1368,15 @@ class DatabaseService {
     reason?: string;
     canRestore?: boolean;
   }): TrashItem {
+    const actor = this.getCurrentUser();
     const item: TrashItem = {
       id: 'trash-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
       entityType: params.entityType,
       entityId: params.entityId,
       entityName: params.entityName,
       deletedAt: new Date().toISOString(),
-      deletedBy: 'Admin',
-      reason: params.reason || 'Deleted by Admin',
+      deletedBy: actor?.fullName || 'Admin',
+      reason: params.reason || `Deleted by ${actor?.fullName || 'Admin'}`,
       consequencesSummary: params.consequencesSummary,
       payload: JSON.parse(JSON.stringify(params.payload)),
       canRestore: params.canRestore ?? true,
@@ -1368,10 +1913,17 @@ class DatabaseService {
     deliveryFeeCharged: number;
     advancePaid: number;
     advancePaymentMethod?: string;
+    paymentMethod?: string;
     courierName: string;
-    sourceChannel: 'Facebook Page' | 'WhatsApp' | 'Website' | 'TikTok' | 'Direct Call' | 'Showroom';
+    sourceChannel: 'Facebook Page' | 'WhatsApp' | 'Website' | 'TikTok' | 'Direct Call' | 'Showroom' | 'AI Auto Entry';
     notes?: string;
+    orderDate?: string;
+    initialStatus?: OrderStatus;
+    entryMethod?: 'manual' | 'ai_auto' | 'batch_auto';
+    createdByUserId?: string;
+    createdByName?: string;
   }): { success: boolean; order?: Order; error?: string; duplicateWarning?: string } {
+    const actor = this.getCurrentUser();
     const recentDuplicate = this.state.orders.find(
       (o) =>
         o.customerPhone.replace(/[\s-]/g, '') === orderInput.customerPhone.replace(/[\s-]/g, '') &&
@@ -1409,9 +1961,11 @@ class DatabaseService {
     const codAmount = Math.max(0, itemTotal - (orderInput.discount || 0) + (orderInput.deliveryFeeCharged || 0) - (orderInput.advancePaid || 0));
     const now = new Date().toISOString();
     const orderNumber = 'CGH-' + new Date().getFullYear() + String(new Date().getMonth() + 1).padStart(2, '0') + '-' + String(this.state.orders.length + 1).padStart(3, '0');
+    const creatorName = orderInput.createdByName || actor.fullName || 'Admin';
+    const creatorId = orderInput.createdByUserId || actor.id;
 
     const newOrder: Order = {
-      id: 'ord-' + Date.now(),
+      id: 'ord-' + Date.now() + '-' + Math.random().toString(36).slice(2, 5),
       orderNumber,
       customerName: orderInput.customerName.trim(),
       customerPhone: orderInput.customerPhone.trim(),
@@ -1423,20 +1977,27 @@ class DatabaseService {
       discount: orderInput.discount || 0,
       deliveryFeeCharged: orderInput.deliveryFeeCharged || 0,
       advancePaid: orderInput.advancePaid || 0,
-      advancePaymentMethod: orderInput.advancePaymentMethod || 'Cash',
+      advancePaymentMethod: orderInput.advancePaymentMethod || orderInput.paymentMethod || 'Cash on Delivery',
+      paymentMethod: orderInput.paymentMethod || orderInput.advancePaymentMethod || 'Cash on Delivery',
       codAmount,
-      courierName: orderInput.courierName,
+      courierName: orderInput.courierName || 'Steadfast',
       sourceChannel: orderInput.sourceChannel,
       status: 'pending',
-      orderDate: now,
+      orderDate: orderInput.orderDate || now,
       refundAmount: 0,
       notes: orderInput.notes || '',
+      createdByUserId: creatorId,
+      createdByName: creatorName,
+      entryMethod: orderInput.entryMethod || (orderInput.sourceChannel === 'AI Auto Entry' ? 'ai_auto' : 'manual'),
       statusTimeline: [
         {
           status: 'pending',
           timestamp: now,
-          note: 'Manual order created by Admin. Ready for phone confirmation.',
-          changedBy: 'Admin',
+          note:
+            orderInput.sourceChannel === 'AI Auto Entry'
+              ? `Order created via AI Auto Order Entry by ${creatorName}.`
+              : `Manual order created by ${creatorName}. Ready for phone confirmation.`,
+          changedBy: creatorName,
         },
       ],
       createdAt: now,
@@ -1444,6 +2005,21 @@ class DatabaseService {
     };
 
     this.state.orders.unshift(newOrder);
+
+    // If initialStatus is confirmed/processing/packed/shipped, transition through updateOrderStatus so stock is reserved/deducted once accurately
+    if (orderInput.initialStatus && orderInput.initialStatus !== 'pending') {
+      const statusRes = this.updateOrderStatus({
+        orderId: newOrder.id,
+        newStatus: orderInput.initialStatus,
+        performedBy: creatorName,
+        note: `Initial order status set to ${orderInput.initialStatus} by ${creatorName}.`,
+      });
+      if (!statusRes.success) {
+        // Rollback order creation if stock reservation fails
+        this.state.orders = this.state.orders.filter((o) => o.id !== newOrder.id);
+        return { success: false, error: statusRes.error };
+      }
+    }
 
     let cust = this.state.customers.find((c) => c.phone.replace(/[\s-]/g, '') === newOrder.customerPhone.replace(/[\s-]/g, ''));
     if (!cust) {
@@ -1465,7 +2041,14 @@ class DatabaseService {
       cust.name = newOrder.customerName;
     }
 
-    this.logAudit('CREATE_ORDER', 'Order', newOrder.id, `Created order ${newOrder.orderNumber} for ৳${itemTotal} (COD: ৳${codAmount})`);
+    this.logAudit(
+      'CREATE_ORDER',
+      'Order',
+      newOrder.id,
+      `Created order ${newOrder.orderNumber} (${newOrder.customerName}) for ৳${itemTotal} (Delivery: ৳${newOrder.deliveryFeeCharged}, COD: ৳${codAmount})`,
+      creatorName,
+      'orders'
+    );
     this.saveToStorage();
 
     return { success: true, order: newOrder, duplicateWarning };
@@ -2790,6 +3373,8 @@ class DatabaseService {
         cashTransactions: data.cashTransactions || INITIAL_CASH_TRANSACTIONS,
         auditLogs: data.auditLogs || [],
         trash: data.trash || [],
+        users: data.users && data.users.length > 0 ? data.users : JSON.parse(JSON.stringify(INITIAL_USERS)),
+        rolePermissions: data.rolePermissions || getDefaultRolePermissions(),
         settings: { ...INITIAL_SETTINGS, ...(data.settings || {}) },
       };
       this.saveToStorage();

@@ -41,11 +41,68 @@ export interface ProductVariant {
   reservedStock: number;
 }
 
+export type UserRole =
+  | 'super_admin'
+  | 'admin'
+  | 'order_manager'
+  | 'inventory_manager'
+  | 'accountant'
+  | 'staff';
+
+export type PermissionAction = 'view' | 'create' | 'edit' | 'delete' | 'export' | 'approve';
+
+export type AppModule =
+  | 'dashboard'
+  | 'orders'
+  | 'ai_order_entry'
+  | 'inventory'
+  | 'purchases'
+  | 'couriers'
+  | 'expenses'
+  | 'accounting'
+  | 'customers'
+  | 'reports'
+  | 'users'
+  | 'audit_logs'
+  | 'settings';
+
+export type RolePermissionMap = Record<UserRole, Record<AppModule, PermissionAction[]>>;
+
+export interface UserAccount {
+  id: string;
+  username: string;
+  fullName: string;
+  email: string;
+  phone: string;
+  role: UserRole;
+  passwordHash: string;
+  passwordSalt: string;
+  isActive: boolean;
+  customPermissions?: Partial<Record<AppModule, PermissionAction[]>>;
+  lastLoginAt?: string;
+  revokedAt?: string;
+  sessionVersion: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AuthSession {
+  token: string;
+  userId: string;
+  username: string;
+  fullName: string;
+  role: UserRole;
+  sessionVersion: number;
+  issuedAt: string;
+  expiresAt: string;
+}
+
 export interface Product {
   id: string;
   sku: string;
   name: string;
   banglaName?: string;
+  aliases?: string[];
   category: string;
   supplierId: string;
   supplierName: string;
@@ -170,10 +227,11 @@ export interface Order {
   deliveryFeeCharged: number;
   advancePaid: number;
   advancePaymentMethod?: string;
+  paymentMethod?: string; // e.g., "Cash on Delivery", "bKash", "Nagad", "Bank Transfer"
   codAmount: number; // (itemTotal - discount + deliveryFeeCharged) - advancePaid
   courierName: string;
   consignmentNumber?: string;
-  sourceChannel: 'Facebook Page' | 'WhatsApp' | 'Website' | 'TikTok' | 'Direct Call' | 'Showroom';
+  sourceChannel: 'Facebook Page' | 'WhatsApp' | 'Website' | 'TikTok' | 'Direct Call' | 'Showroom' | 'AI Auto Entry';
   status: OrderStatus;
   orderDate: string; // ISO
   deliveryDate?: string;
@@ -182,6 +240,10 @@ export interface Order {
   returnDisposition?: 'restock' | 'damaged' | 'scrap';
   notes?: string;
   refundAmount: number;
+  createdByUserId?: string;
+  createdByName?: string;
+  approvedByName?: string;
+  entryMethod?: 'manual' | 'ai_auto' | 'batch_auto';
   statusTimeline: StatusChangeRecord[];
   createdAt: string;
   updatedAt: string;
@@ -288,6 +350,9 @@ export interface AuditLog {
   entityId: string;
   details: string;
   performedBy: string;
+  userId?: string;
+  userRole?: UserRole;
+  module?: AppModule;
 }
 
 export interface AppSettings {
@@ -336,7 +401,8 @@ export type TrashEntityType =
   | 'CourierSettlement'
   | 'Customer'
   | 'StockMovement'
-  | 'CashTransaction';
+  | 'CashTransaction'
+  | 'User';
 
 export interface TrashItem {
   id: string;
@@ -366,6 +432,8 @@ export interface DatabaseState {
   cashTransactions: CashTransaction[];
   auditLogs: AuditLog[];
   trash: TrashItem[];
+  users: UserAccount[];
+  rolePermissions: RolePermissionMap;
   settings: AppSettings;
 }
 
