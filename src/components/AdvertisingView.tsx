@@ -17,14 +17,17 @@ interface AdvertisingViewProps {
   adExpenses: AdExpense[];
   defaultExchangeRate: number;
   onSaveAdExpense: (input: any) => AdExpense;
+  onDeleteAdExpense?: (adId: string) => { success: boolean };
 }
 
 export const AdvertisingView: React.FC<AdvertisingViewProps> = ({
   adExpenses,
   defaultExchangeRate,
   onSaveAdExpense,
+  onDeleteAdExpense,
 }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingAdId, setEditingAdId] = useState<string | null>(null);
 
   // Form states
   const [platform, setPlatform] = useState<'Meta / Facebook' | 'Google' | 'TikTok' | 'Other'>('Meta / Facebook');
@@ -49,6 +52,7 @@ export const AdvertisingView: React.FC<AdvertisingViewProps> = ({
 
   // Open modal
   const handleOpenModal = () => {
+    setEditingAdId(null);
     setCampaignName('');
     setStartDate(new Date().toISOString().split('T')[0]);
     setEndDate(new Date().toISOString().split('T')[0]);
@@ -58,6 +62,23 @@ export const AdvertisingView: React.FC<AdvertisingViewProps> = ({
     setReference('TXN-FB-' + Math.floor(100000 + Math.random() * 900000));
     setNotes('');
     setAllocationMethod('even');
+    setIsModalOpen(true);
+  };
+
+  const handleEditAd = (ad: AdExpense) => {
+    setEditingAdId(ad.id);
+    setPlatform(ad.platform);
+    setCampaignName(ad.campaignName);
+    setStartDate(ad.startDate);
+    setEndDate(ad.endDate);
+    setUsdAmount(ad.usdAmount);
+    setExchangeRate(ad.exchangeRate);
+    setFeeBdt(ad.feeBdt);
+    setPaymentMethod(ad.paymentMethod);
+    setReference(ad.reference || '');
+    setNotes(ad.notes || '');
+    setAllocationMethod(ad.allocationMethod);
+    setManualAllocations(ad.allocations);
     setIsModalOpen(true);
   };
 
@@ -77,6 +98,7 @@ export const AdvertisingView: React.FC<AdvertisingViewProps> = ({
     }
 
     onSaveAdExpense({
+      id: editingAdId || undefined,
       platform,
       campaignName,
       startDate,
@@ -177,12 +199,13 @@ export const AdvertisingView: React.FC<AdvertisingViewProps> = ({
                 <th className="px-4 py-3 text-right">Total BDT Paid</th>
                 <th className="px-4 py-3 text-center">Daily Allocation</th>
                 <th className="px-4 py-3">Payment Ref</th>
+                <th className="px-4 py-3 text-center">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {adExpenses.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="p-8 text-center text-slate-400">
+                  <td colSpan={9} className="p-8 text-center text-slate-400">
                     No advertising expenses recorded yet. Click "Log Ad Spend" to record campaign costs.
                   </td>
                 </tr>
@@ -227,12 +250,34 @@ export const AdvertisingView: React.FC<AdvertisingViewProps> = ({
                         <td className="px-4 py-3 text-slate-500 font-mono text-[11px]">
                           {ad.reference || ad.paymentMethod}
                         </td>
+                        <td className="px-4 py-3 text-center whitespace-nowrap">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              onClick={() => handleEditAd(ad)}
+                              className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold rounded text-[11px] cursor-pointer"
+                            >
+                              Edit
+                            </button>
+                            {onDeleteAdExpense && (
+                              <button
+                                onClick={() => {
+                                  if (window.confirm(`Delete ad campaign "${ad.campaignName}" ($${ad.usdAmount})?`)) {
+                                    onDeleteAdExpense(ad.id);
+                                  }
+                                }}
+                                className="px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 font-semibold rounded text-[11px] cursor-pointer"
+                              >
+                                Delete
+                              </button>
+                            )}
+                          </div>
+                        </td>
                       </tr>
 
                       {/* Expanded Daily Allocation Breakdown */}
                       {isExpanded && (
                         <tr className="bg-slate-50/80">
-                          <td colSpan={8} className="p-4">
+                          <td colSpan={9} className="p-4">
                             <div className="border border-slate-200 rounded-lg p-3 bg-white space-y-2">
                               <div className="flex items-center justify-between text-xs font-bold text-slate-800">
                                 <span>Daily Allocation Schedule ({ad.allocationMethod} method)</span>

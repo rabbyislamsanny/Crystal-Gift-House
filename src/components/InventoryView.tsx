@@ -18,6 +18,7 @@ interface InventoryViewProps {
   stockMovements: StockMovement[];
   suppliers: Supplier[];
   onSaveProduct: (productData: any) => Product;
+  onDeleteProduct?: (productId: string) => { success: boolean; error?: string };
   onAdjustStock: (params: { productId: string; newOnHand: number; reason: string }) => { success: boolean; error?: string };
   selectedProduct?: Product | null;
   onClearSelectedProduct?: () => void;
@@ -28,6 +29,7 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
   stockMovements,
   suppliers,
   onSaveProduct,
+  onDeleteProduct,
   onAdjustStock,
   selectedProduct,
   onClearSelectedProduct,
@@ -365,6 +367,21 @@ export const InventoryView: React.FC<InventoryViewProps> = ({
                             >
                               Edit
                             </button>
+                            {onDeleteProduct && (
+                              <button
+                                onClick={() => {
+                                  if (window.confirm(`Delete product "${p.name}" (${p.sku})?`)) {
+                                    const res = onDeleteProduct(p.id);
+                                    if (!res.success && res.error) {
+                                      alert(res.error);
+                                    }
+                                  }
+                                }}
+                                className="px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 font-semibold rounded text-[11px] cursor-pointer"
+                              >
+                                Delete
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>

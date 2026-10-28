@@ -44,6 +44,7 @@ export interface ParcelAccountingData {
   collectedAmount: number;
   settledAmount: number;
   isSettled: boolean;
+  dispatchDate?: string;
   settlementDate?: string;
   status: 'pending_dispatch' | 'in_transit' | 'delivered' | 'failed' | 'returned' | 'settled';
 }

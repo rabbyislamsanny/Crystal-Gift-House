@@ -28,6 +28,7 @@ export type MovementType =
   | 'adjustment';
 
 export type DeliveryZone = 'inside_dhaka' | 'sub_dhaka' | 'outside_dhaka';
+export type ReturnDisposition = 'restock' | 'damaged' | 'scrap';
 
 export interface ProductVariant {
   id: string;

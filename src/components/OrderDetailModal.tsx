@@ -13,8 +13,11 @@ import {
   MapPin,
   Phone,
   ShieldAlert,
+  Edit3,
+  Trash2,
 } from 'lucide-react';
 import { Order, OrderStatus, ReturnDisposition } from '../types/database';
+import { BANGLADESH_DISTRICTS, COURIER_PROVIDERS } from '../utils/districtData';
 
 interface OrderDetailModalProps {
   order: Order | null;
@@ -27,6 +30,8 @@ interface OrderDetailModalProps {
     returnDisposition?: ReturnDisposition;
     cancelReason?: string;
   }) => { success: boolean; error?: string };
+  onUpdateOrder?: (orderId: string, updates: any) => { success: boolean; order?: Order; error?: string };
+  onDeleteOrder?: (orderId: string) => { success: boolean; error?: string };
   onPrintInvoice: (order: Order) => void;
 }
 
@@ -35,6 +40,8 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
   isOpen,
   onClose,
   onUpdateStatus,
+  onUpdateOrder,
+  onDeleteOrder,
   onPrintInvoice,
 }) => {
   const [transitionStatus, setTransitionStatus] = useState<OrderStatus | ''>('');
@@ -42,8 +49,55 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
   const [cancelReason, setCancelReason] = useState('');
   const [returnDisposition, setReturnDisposition] = useState<ReturnDisposition>('restock');
   const [errorMessage, setErrorMessage] = useState('');
+  const [isEditing, setIsEditing] = useState(false);
+
+  const [editCustomerName, setEditCustomerName] = useState('');
+  const [editCustomerPhone, setEditCustomerPhone] = useState('');
+  const [editFullAddress, setEditFullAddress] = useState('');
+  const [editDistrict, setEditDistrict] = useState('Dhaka');
+  const [editDeliveryZone, setEditDeliveryZone] = useState<'inside_dhaka' | 'sub_dhaka' | 'outside_dhaka'>('inside_dhaka');
+  const [editCourierName, setEditCourierName] = useState('Steadfast');
+  const [editConsignment, setEditConsignment] = useState('');
+  const [editDiscount, setEditDiscount] = useState(0);
+  const [editDeliveryFee, setEditDeliveryFee] = useState(80);
+  const [editAdvancePaid, setEditAdvancePaid] = useState(0);
 
   if (!isOpen || !order) return null;
+
+  const startEditing = () => {
+    setEditCustomerName(order.customerName);
+    setEditCustomerPhone(order.customerPhone);
+    setEditFullAddress(order.fullAddress);
+    setEditDistrict(order.district);
+    setEditDeliveryZone(order.deliveryZone);
+    setEditCourierName(order.courierName);
+    setEditConsignment(order.consignmentNumber || '');
+    setEditDiscount(order.discount);
+    setEditDeliveryFee(order.deliveryFeeCharged);
+    setEditAdvancePaid(order.advancePaid);
+    setIsEditing(true);
+  };
+
+  const handleSaveEdit = () => {
+    if (!onUpdateOrder) return;
+    const res = onUpdateOrder(order.id, {
+      customerName: editCustomerName,
+      customerPhone: editCustomerPhone,
+      fullAddress: editFullAddress,
+      district: editDistrict,
+      deliveryZone: editDeliveryZone,
+      courierName: editCourierName,
+      consignmentNumber: editConsignment,
+      discount: editDiscount,
+      deliveryFeeCharged: editDeliveryFee,
+      advancePaid: editAdvancePaid,
+    });
+    if (res.success) {
+      setIsEditing(false);
+    } else {
+      setErrorMessage(res.error || 'Failed to update order');
+    }
+  };
 
   const handleApplyStatusChange = () => {
     if (!transitionStatus) return;
@@ -138,33 +192,167 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {/* Customer & Delivery Card */}
             <div className="p-4 rounded-xl border border-slate-200 bg-slate-50 space-y-3">
-              <h3 className="font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5 text-[11px]">
-                <User className="w-3.5 h-3.5 text-emerald-700" />
-                <span>Customer & Destination</span>
-              </h3>
-              <div className="space-y-1.5">
-                <div className="text-sm font-bold text-slate-900">{order.customerName}</div>
-                <div className="flex items-center gap-1.5 text-slate-700 font-mono">
-                  <Phone className="w-3.5 h-3.5 text-slate-400" />
-                  <span>{order.customerPhone}</span>
-                </div>
-                <div className="flex items-start gap-1.5 text-slate-600 leading-relaxed">
-                  <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-                  <span>
-                    {order.fullAddress}, <strong className="text-slate-800">{order.district}</strong> ({order.deliveryZone.replace('_', ' ')})
-                  </span>
-                </div>
-                <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-slate-600">
-                  <span>Assigned Courier:</span>
-                  <span className="font-semibold text-slate-900">{order.courierName}</span>
-                </div>
-                {order.consignmentNumber && (
-                  <div className="flex items-center justify-between text-slate-600">
-                    <span>Consignment / Tracking:</span>
-                    <span className="font-mono font-semibold text-emerald-800">{order.consignmentNumber}</span>
-                  </div>
+              <div className="flex items-center justify-between">
+                <h3 className="font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5 text-[11px]">
+                  <User className="w-3.5 h-3.5 text-emerald-700" />
+                  <span>Customer & Destination</span>
+                </h3>
+                {onUpdateOrder && !isEditing && (
+                  <button
+                    type="button"
+                    onClick={startEditing}
+                    className="flex items-center gap-1 px-2 py-1 text-[11px] font-semibold bg-white border border-slate-200 rounded hover:bg-slate-100 text-emerald-800 cursor-pointer"
+                  >
+                    <Edit3 className="w-3 h-3" />
+                    <span>Edit Details</span>
+                  </button>
                 )}
               </div>
+
+              {isEditing ? (
+                <div className="space-y-2.5 bg-white p-3 rounded-lg border border-slate-200">
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">Customer Name</label>
+                      <input
+                        type="text"
+                        value={editCustomerName}
+                        onChange={(e) => setEditCustomerName(e.target.value)}
+                        className="w-full px-2 py-1 border border-slate-200 rounded text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">Phone</label>
+                      <input
+                        type="text"
+                        value={editCustomerPhone}
+                        onChange={(e) => setEditCustomerPhone(e.target.value)}
+                        className="w-full px-2 py-1 border border-slate-200 rounded text-xs font-mono"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">Full Address</label>
+                    <input
+                      type="text"
+                      value={editFullAddress}
+                      onChange={(e) => setEditFullAddress(e.target.value)}
+                      className="w-full px-2 py-1 border border-slate-200 rounded text-xs"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">District</label>
+                      <select
+                        value={editDistrict}
+                        onChange={(e) => {
+                          const dist = e.target.value;
+                          setEditDistrict(dist);
+                          const found = BANGLADESH_DISTRICTS.find((d) => d.name === dist);
+                          const zone = found ? found.defaultZone : 'outside_dhaka';
+                          setEditDeliveryZone(zone);
+                          setEditDeliveryFee(zone === 'inside_dhaka' ? 80 : zone === 'sub_dhaka' ? 100 : 120);
+                        }}
+                        className="w-full px-2 py-1 border border-slate-200 rounded text-xs"
+                      >
+                        {BANGLADESH_DISTRICTS.map((d) => (
+                          <option key={d.name} value={d.name}>{d.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">Courier</label>
+                      <select
+                        value={editCourierName}
+                        onChange={(e) => setEditCourierName(e.target.value)}
+                        className="w-full px-2 py-1 border border-slate-200 rounded text-xs"
+                      >
+                        {COURIER_PROVIDERS.map((c) => (
+                          <option key={c.id} value={c.id}>{c.name}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">Delivery (৳)</label>
+                      <input
+                        type="number"
+                        value={editDeliveryFee}
+                        onChange={(e) => setEditDeliveryFee(Number(e.target.value) || 0)}
+                        className="w-full px-2 py-1 border border-slate-200 rounded text-xs font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">Discount (৳)</label>
+                      <input
+                        type="number"
+                        value={editDiscount}
+                        onChange={(e) => setEditDiscount(Number(e.target.value) || 0)}
+                        className="w-full px-2 py-1 border border-slate-200 rounded text-xs font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">Advance (৳)</label>
+                      <input
+                        type="number"
+                        value={editAdvancePaid}
+                        onChange={(e) => setEditAdvancePaid(Number(e.target.value) || 0)}
+                        className="w-full px-2 py-1 border border-slate-200 rounded text-xs font-mono"
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-600 mb-0.5">Consignment / Tracking</label>
+                    <input
+                      type="text"
+                      value={editConsignment}
+                      onChange={(e) => setEditConsignment(e.target.value)}
+                      className="w-full px-2 py-1 border border-slate-200 rounded text-xs font-mono"
+                    />
+                  </div>
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setIsEditing(false)}
+                      className="px-2.5 py-1 text-slate-600 bg-slate-100 rounded text-xs cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleSaveEdit}
+                      className="px-3 py-1 text-white bg-emerald-700 hover:bg-emerald-800 font-semibold rounded text-xs cursor-pointer"
+                    >
+                      Save Changes
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <div className="text-sm font-bold text-slate-900">{order.customerName}</div>
+                  <div className="flex items-center gap-1.5 text-slate-700 font-mono">
+                    <Phone className="w-3.5 h-3.5 text-slate-400" />
+                    <span>{order.customerPhone}</span>
+                  </div>
+                  <div className="flex items-start gap-1.5 text-slate-600 leading-relaxed">
+                    <MapPin className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+                    <span>
+                      {order.fullAddress}, <strong className="text-slate-800">{order.district}</strong> ({order.deliveryZone.replace('_', ' ')})
+                    </span>
+                  </div>
+                  <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-slate-600">
+                    <span>Assigned Courier:</span>
+                    <span className="font-semibold text-slate-900">{order.courierName}</span>
+                  </div>
+                  {order.consignmentNumber && (
+                    <div className="flex items-center justify-between text-slate-600">
+                      <span>Consignment / Tracking:</span>
+                      <span className="font-mono font-semibold text-emerald-800">{order.consignmentNumber}</span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Status Transition Control Card */}
@@ -435,12 +623,28 @@ export const OrderDetailModal: React.FC<OrderDetailModalProps> = ({
           <span className="text-[11px] text-slate-400">
             Order ID: {order.id} • District Zone: {order.deliveryZone}
           </span>
-          <button
-            onClick={onClose}
-            className="px-4 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer"
-          >
-            Close
-          </button>
+          <div className="flex items-center gap-2">
+            {onDeleteOrder && (
+              <button
+                onClick={() => {
+                  if (window.confirm(`Permanently delete order ${order.orderNumber}?`)) {
+                    onDeleteOrder(order.id);
+                    onClose();
+                  }
+                }}
+                className="flex items-center gap-1 px-3 py-1.5 text-xs font-semibold text-red-700 bg-red-50 border border-red-200 hover:bg-red-100 rounded-lg cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Delete Order</span>
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="px-4 py-1.5 text-xs font-semibold text-slate-700 bg-white border border-slate-200 hover:bg-slate-100 rounded-lg cursor-pointer"
+            >
+              Close
+            </button>
+          </div>
         </div>
       </div>
     </div>

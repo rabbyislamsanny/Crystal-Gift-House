@@ -34,7 +34,7 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({
 
   const [items, setItems] = useState<SelectedItem[]>([]);
   const [discount, setDiscount] = useState<number>(0);
-  const [deliveryFee, setDeliveryFee] = useState<number>(70);
+  const [deliveryFee, setDeliveryFee] = useState<number>(80);
   const [advancePaid, setAdvancePaid] = useState<number>(0);
   const [advanceMethod, setAdvanceMethod] = useState('bKash');
 
@@ -49,7 +49,7 @@ export const NewOrderModal: React.FC<NewOrderModalProps> = ({
     const found = BANGLADESH_DISTRICTS.find((d) => d.name === distName);
     const zone = found ? found.defaultZone : 'outside_dhaka';
     setDeliveryZone(zone);
-    const fee = zone === 'inside_dhaka' ? 70 : zone === 'sub_dhaka' ? 100 : 130;
+    const fee = zone === 'inside_dhaka' ? 80 : zone === 'sub_dhaka' ? 100 : 120;
     setDeliveryFee(fee);
   };
 

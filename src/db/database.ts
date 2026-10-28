@@ -6,6 +6,7 @@ import {
   StockMovement,
   Customer,
   Order,
+  OrderItem,
   Parcel,
   AdExpense,
   OperatingExpense,
@@ -37,9 +38,9 @@ export const INITIAL_SETTINGS: AppSettings = {
   currency: 'BDT',
   currencySymbol: '৳',
   defaultExchangeRate: 122.5,
-  defaultInsideDhakaFee: 70,
+  defaultInsideDhakaFee: 80,
   defaultSubDhakaFee: 100,
-  defaultOutsideDhakaFee: 130,
+  defaultOutsideDhakaFee: 120,
   ownerPin: '1234',
   timezone: 'Asia/Dhaka',
 };
@@ -200,10 +201,10 @@ export const INITIAL_ORDERS: Order[] = [
     ],
     itemTotal: 1850,
     discount: 50,
-    deliveryFeeCharged: 70,
+    deliveryFeeCharged: 80,
     advancePaid: 200,
     advancePaymentMethod: 'bKash',
-    codAmount: 1670,
+    codAmount: 1680,
     courierName: 'Steadfast',
     consignmentNumber: 'ST-902188',
     sourceChannel: 'Facebook Page',
@@ -244,9 +245,9 @@ export const INITIAL_ORDERS: Order[] = [
     ],
     itemTotal: 2500,
     discount: 100,
-    deliveryFeeCharged: 130,
+    deliveryFeeCharged: 120,
     advancePaid: 0,
-    codAmount: 2530,
+    codAmount: 2520,
     courierName: 'Steadfast',
     consignmentNumber: 'ST-902401',
     sourceChannel: 'WhatsApp',
@@ -284,10 +285,10 @@ export const INITIAL_ORDERS: Order[] = [
     ],
     itemTotal: 2200,
     discount: 0,
-    deliveryFeeCharged: 130,
+    deliveryFeeCharged: 120,
     advancePaid: 500,
     advancePaymentMethod: 'Nagad',
-    codAmount: 1830,
+    codAmount: 1820,
     courierName: 'Pathao',
     consignmentNumber: 'PTH-88310',
     sourceChannel: 'Website',
@@ -356,10 +357,10 @@ export const INITIAL_PARCELS: Parcel[] = [
     courierName: 'Steadfast',
     trackingNumber: 'ST-902188',
     consignmentId: 'ST-902188',
-    codAmount: 1670,
-    deliveryCharge: 70,
+    codAmount: 1680,
+    deliveryCharge: 80,
     returnCharge: 0,
-    collectedAmount: 1670,
+    collectedAmount: 1680,
     settledAmount: 1600,
     isSettled: true,
     settlementDate: '2026-10-22T10:00:00Z',
@@ -379,8 +380,8 @@ export const INITIAL_PARCELS: Parcel[] = [
     courierName: 'Steadfast',
     trackingNumber: 'ST-902401',
     consignmentId: 'ST-902401',
-    codAmount: 2530,
-    deliveryCharge: 130,
+    codAmount: 2520,
+    deliveryCharge: 120,
     returnCharge: 0,
     collectedAmount: 0,
     settledAmount: 0,
@@ -770,6 +771,18 @@ class DatabaseService {
     }
   }
 
+  public deleteProduct(productId: string): { success: boolean; error?: string } {
+    const prod = this.state.products.find((p) => p.id === productId);
+    if (!prod) return { success: false, error: 'Product not found' };
+    if (prod.reservedStock > 0) {
+      return { success: false, error: `Cannot delete "${prod.name}": ${prod.reservedStock} units are currently reserved for active orders.` };
+    }
+    this.state.products = this.state.products.filter((p) => p.id !== productId);
+    this.logAudit('DELETE_PRODUCT', 'Product', productId, `Deleted product ${prod.name} (${prod.sku})`);
+    this.saveToStorage();
+    return { success: true };
+  }
+
   public recordStockMovement(mov: Omit<StockMovement, 'id' | 'date'>): StockMovement {
     const fullMovement: StockMovement = {
       id: 'mov-' + Date.now() + '-' + Math.random().toString(36).substr(2, 4),
@@ -1061,6 +1074,92 @@ class DatabaseService {
     return { success: true, order: newOrder, duplicateWarning };
   }
 
+  public updateOrder(orderId: string, updates: {
+    customerName?: string;
+    customerPhone?: string;
+    fullAddress?: string;
+    district?: string;
+    deliveryZone?: 'inside_dhaka' | 'sub_dhaka' | 'outside_dhaka';
+    discount?: number;
+    deliveryFeeCharged?: number;
+    advancePaid?: number;
+    courierName?: string;
+    consignmentNumber?: string;
+    notes?: string;
+  }): { success: boolean; order?: Order; error?: string } {
+    const order = this.state.orders.find((o) => o.id === orderId);
+    if (!order) return { success: false, error: 'Order not found' };
+
+    if (updates.customerName !== undefined) order.customerName = updates.customerName.trim();
+    if (updates.customerPhone !== undefined) order.customerPhone = updates.customerPhone.trim();
+    if (updates.fullAddress !== undefined) order.fullAddress = updates.fullAddress.trim();
+    if (updates.district !== undefined) order.district = updates.district;
+    if (updates.deliveryZone !== undefined) order.deliveryZone = updates.deliveryZone;
+    if (updates.discount !== undefined) order.discount = Number(updates.discount) || 0;
+    if (updates.deliveryFeeCharged !== undefined) order.deliveryFeeCharged = Number(updates.deliveryFeeCharged) || 0;
+    if (updates.advancePaid !== undefined) order.advancePaid = Number(updates.advancePaid) || 0;
+    if (updates.courierName !== undefined) order.courierName = updates.courierName;
+    if (updates.consignmentNumber !== undefined) order.consignmentNumber = updates.consignmentNumber.trim();
+    if (updates.notes !== undefined) order.notes = updates.notes;
+
+    order.codAmount = Math.max(0, order.itemTotal - order.discount + order.deliveryFeeCharged - order.advancePaid);
+    order.updatedAt = new Date().toISOString();
+
+    const parcel = this.state.parcels.find((p) => p.orderId === order.id);
+    if (parcel && !parcel.isSettled) {
+      parcel.customerName = order.customerName;
+      parcel.customerPhone = order.customerPhone;
+      parcel.courierName = order.courierName;
+      parcel.codAmount = order.codAmount;
+      if (order.consignmentNumber) {
+        parcel.trackingNumber = order.consignmentNumber;
+        parcel.consignmentId = order.consignmentNumber;
+      }
+    }
+
+    this.logAudit('UPDATE_ORDER', 'Order', order.id, `Updated details for Order ${order.orderNumber}`);
+    this.saveToStorage();
+    return { success: true, order };
+  }
+
+  public deleteOrder(orderId: string): { success: boolean; error?: string } {
+    const order = this.state.orders.find((o) => o.id === orderId);
+    if (!order) return { success: false, error: 'Order not found' };
+
+    if (['confirmed', 'processing', 'packed'].includes(order.status)) {
+      for (const item of order.items) {
+        const prod = this.state.products.find((p) => p.id === item.productId);
+        if (prod) {
+          const prevReservedVal = prod.reservedStock;
+          const releasedState = cancelPreDispatchReservation(
+            { onHand: prod.currentStock, reserved: prod.reservedStock, purchaseCost: prod.purchaseCost, damagedStock: prod.damagedStock },
+            item.quantity
+          );
+          prod.reservedStock = releasedState.reserved;
+          this.recordStockMovement({
+            productId: prod.id,
+            productName: prod.name,
+            movementType: 'reservation_release',
+            quantity: item.quantity,
+            previousOnHand: prod.currentStock,
+            newOnHand: prod.currentStock,
+            previousReserved: prevReservedVal,
+            newReserved: prod.reservedStock,
+            reason: `Order ${order.orderNumber} deleted. Reservation released.`,
+            referenceId: order.id,
+            performedBy: 'Admin',
+          });
+        }
+      }
+    }
+
+    this.state.parcels = this.state.parcels.filter((p) => p.orderId !== orderId);
+    this.state.orders = this.state.orders.filter((o) => o.id !== orderId);
+    this.logAudit('DELETE_ORDER', 'Order', orderId, `Deleted order ${order.orderNumber}`);
+    this.saveToStorage();
+    return { success: true };
+  }
+
   public updateOrderStatus(params: {
     orderId: string;
     newStatus: OrderStatus;
@@ -1148,7 +1247,7 @@ class DatabaseService {
 
       let parcel = this.state.parcels.find((p) => p.orderId === order.id);
       if (!parcel) {
-        const defaultDeliveryCharge = order.deliveryZone === 'inside_dhaka' ? 70 : order.deliveryZone === 'sub_dhaka' ? 100 : 130;
+        const defaultDeliveryCharge = order.deliveryFeeCharged || (order.deliveryZone === 'inside_dhaka' ? 80 : order.deliveryZone === 'sub_dhaka' ? 100 : 120);
         parcel = {
           id: 'pcl-' + Date.now(),
           orderId: order.id,
@@ -1222,7 +1321,8 @@ class DatabaseService {
 
     // 5. Transition: TO RETURNED
     if (newStatus === 'returned') {
-      order.returnDisposition = params.returnDisposition || 'restock';
+      const disposition: ReturnDisposition = params.returnDisposition || 'restock';
+      order.returnDisposition = disposition;
       const parcel = this.state.parcels.find((p) => p.orderId === order.id);
       if (parcel) {
         parcel.status = 'returned';
@@ -1235,7 +1335,7 @@ class DatabaseService {
           const outcome = inspectAndProcessReturn(
             { onHand: prod.currentStock, reserved: prod.reservedStock, purchaseCost: prod.purchaseCost, damagedStock: prod.damagedStock },
             item.quantity,
-            order.returnDisposition
+            disposition
           );
 
           const prevOnHandVal = prod.currentStock;
@@ -1347,6 +1447,7 @@ class DatabaseService {
   }
 
   public saveAdExpense(input: {
+    id?: string;
     platform: 'Meta / Facebook' | 'Google' | 'TikTok' | 'Other';
     campaignName: string;
     startDate: string;
@@ -1367,6 +1468,31 @@ class DatabaseService {
       input.allocationMethod === 'manual' && input.manualDailyAllocations && input.manualDailyAllocations.length > 0
         ? input.manualDailyAllocations
         : allocateAdExpenseEvenly(input.startDate, input.endDate, totalBdt);
+
+    const existingIdx = input.id ? this.state.adExpenses.findIndex((a) => a.id === input.id) : -1;
+    if (existingIdx >= 0) {
+      const updatedAd: AdExpense = {
+        ...this.state.adExpenses[existingIdx],
+        platform: input.platform,
+        campaignName: input.campaignName.trim(),
+        startDate: input.startDate,
+        endDate: input.endDate,
+        usdAmount: input.usdAmount,
+        exchangeRate: input.exchangeRate,
+        bdtEquivalent,
+        feeBdt: input.feeBdt || 0,
+        totalBdt,
+        paymentMethod: input.paymentMethod || 'Credit Card',
+        reference: input.reference || '',
+        notes: input.notes || '',
+        allocationMethod: input.allocationMethod || 'even',
+        allocations,
+      };
+      this.state.adExpenses[existingIdx] = updatedAd;
+      this.logAudit('UPDATE_AD_EXPENSE', 'AdExpense', updatedAd.id, `Updated ad campaign "${updatedAd.campaignName}" ($${input.usdAmount} / ৳${totalBdt})`);
+      this.saveToStorage();
+      return updatedAd;
+    }
 
     const newAd: AdExpense = {
       id: 'ad-' + Date.now(),
@@ -1393,11 +1519,22 @@ class DatabaseService {
     return newAd;
   }
 
+  public deleteAdExpense(adId: string): { success: boolean } {
+    const ad = this.state.adExpenses.find((a) => a.id === adId);
+    this.state.adExpenses = this.state.adExpenses.filter((a) => a.id !== adId);
+    if (ad) {
+      this.logAudit('DELETE_AD_EXPENSE', 'AdExpense', adId, `Deleted ad campaign "${ad.campaignName}" (৳${ad.totalBdt})`);
+    }
+    this.saveToStorage();
+    return { success: true };
+  }
+
   public getOperatingExpenses(): OperatingExpense[] {
     return [...this.state.operatingExpenses];
   }
 
   public saveOperatingExpense(input: {
+    id?: string;
     category: OperatingExpense['category'];
     date: string;
     amount: number;
@@ -1407,6 +1544,25 @@ class DatabaseService {
     notes?: string;
     isCourierFee?: boolean;
   }): OperatingExpense {
+    const existingIdx = input.id ? this.state.operatingExpenses.findIndex((e) => e.id === input.id) : -1;
+    if (existingIdx >= 0) {
+      const updatedExp: OperatingExpense = {
+        ...this.state.operatingExpenses[existingIdx],
+        category: input.category,
+        date: input.date || new Date().toISOString().split('T')[0],
+        amount: Number(input.amount) || 0,
+        paymentStatus: input.paymentStatus || 'paid',
+        paymentMethod: input.paymentMethod || 'Cash',
+        reference: input.reference || '',
+        notes: input.notes || '',
+        isCourierFee: input.isCourierFee || input.category === 'Courier Fees',
+      };
+      this.state.operatingExpenses[existingIdx] = updatedExp;
+      this.logAudit('UPDATE_OPERATING_EXPENSE', 'OperatingExpense', updatedExp.id, `Updated ৳${updatedExp.amount} for ${updatedExp.category}`);
+      this.saveToStorage();
+      return updatedExp;
+    }
+
     const newExp: OperatingExpense = {
       id: 'exp-' + Date.now(),
       category: input.category,
@@ -1424,6 +1580,16 @@ class DatabaseService {
     this.logAudit('LOG_OPERATING_EXPENSE', 'OperatingExpense', newExp.id, `Logged ৳${newExp.amount} for ${newExp.category}`);
     this.saveToStorage();
     return newExp;
+  }
+
+  public deleteOperatingExpense(expId: string): { success: boolean } {
+    const exp = this.state.operatingExpenses.find((e) => e.id === expId);
+    this.state.operatingExpenses = this.state.operatingExpenses.filter((e) => e.id !== expId);
+    if (exp) {
+      this.logAudit('DELETE_OPERATING_EXPENSE', 'OperatingExpense', expId, `Deleted operating expense ৳${exp.amount} (${exp.category})`);
+    }
+    this.saveToStorage();
+    return { success: true };
   }
 
   // --- SETTINGS, BACKUP & RESTORE ---

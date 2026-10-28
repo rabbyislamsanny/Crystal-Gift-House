@@ -92,6 +92,24 @@ export default function App() {
     return saved;
   };
 
+  const handleDeleteProduct = (productId: string) => {
+    const res = db.deleteProduct(productId);
+    refreshState();
+    return res;
+  };
+
+  const handleUpdateOrder = (orderId: string, updates: any) => {
+    const res = db.updateOrder(orderId, updates);
+    refreshState();
+    return res;
+  };
+
+  const handleDeleteOrder = (orderId: string) => {
+    const res = db.deleteOrder(orderId);
+    refreshState();
+    return res;
+  };
+
   const handleAdjustStock = (params: { productId: string; newOnHand: number; reason: string }) => {
     const res = db.adjustStock(params);
     refreshState();
@@ -128,8 +146,20 @@ export default function App() {
     return res;
   };
 
+  const handleDeleteAdExpense = (adId: string) => {
+    const res = db.deleteAdExpense(adId);
+    refreshState();
+    return res;
+  };
+
   const handleSaveOperatingExpense = (expData: any) => {
     const res = db.saveOperatingExpense(expData);
+    refreshState();
+    return res;
+  };
+
+  const handleDeleteOperatingExpense = (expId: string) => {
+    const res = db.deleteOperatingExpense(expId);
     refreshState();
     return res;
   };
@@ -232,6 +262,7 @@ export default function App() {
               orders={dbState.orders}
               onOpenNewOrder={() => setIsNewOrderModalOpen(true)}
               onSelectOrder={(ord) => setSelectedOrder(ord)}
+              onDeleteOrder={handleDeleteOrder}
               onBulkUpdateStatus={handleBulkUpdateStatus}
             />
           )}
@@ -242,6 +273,7 @@ export default function App() {
               stockMovements={dbState.stockMovements}
               suppliers={dbState.suppliers}
               onSaveProduct={handleSaveProduct}
+              onDeleteProduct={handleDeleteProduct}
               onAdjustStock={handleAdjustStock}
             />
           )}
@@ -271,6 +303,7 @@ export default function App() {
               adExpenses={dbState.adExpenses}
               defaultExchangeRate={dbState.settings.defaultExchangeRate}
               onSaveAdExpense={handleSaveAdExpense}
+              onDeleteAdExpense={handleDeleteAdExpense}
             />
           )}
 
@@ -278,6 +311,7 @@ export default function App() {
             <ExpensesView
               expenses={dbState.operatingExpenses}
               onSaveExpense={handleSaveOperatingExpense}
+              onDeleteExpense={handleDeleteOperatingExpense}
             />
           )}
 
@@ -329,6 +363,8 @@ export default function App() {
         isOpen={selectedOrder !== null}
         onClose={() => setSelectedOrder(null)}
         onUpdateStatus={handleUpdateOrderStatus}
+        onUpdateOrder={handleUpdateOrder}
+        onDeleteOrder={handleDeleteOrder}
         onPrintInvoice={(ord) => {
           setOrderToPrint(ord);
         }}

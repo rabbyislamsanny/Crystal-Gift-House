@@ -5,13 +5,16 @@ import { OperatingExpense } from '../types/database';
 interface ExpensesViewProps {
   expenses: OperatingExpense[];
   onSaveExpense: (expense: any) => OperatingExpense;
+  onDeleteExpense?: (expenseId: string) => { success: boolean };
 }
 
 export const ExpensesView: React.FC<ExpensesViewProps> = ({
   expenses,
   onSaveExpense,
+  onDeleteExpense,
 }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingExpenseId, setEditingExpenseId] = useState<string | null>(null);
   const [category, setCategory] = useState<OperatingExpense['category']>('Packaging');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [amount, setAmount] = useState<number>(0);
@@ -35,6 +38,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
   ];
 
   const handleOpenModal = () => {
+    setEditingExpenseId(null);
     setCategory('Packaging');
     setDate(new Date().toISOString().split('T')[0]);
     setAmount(1000);
@@ -46,6 +50,19 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
     setIsModalOpen(true);
   };
 
+  const handleEditExpense = (exp: OperatingExpense) => {
+    setEditingExpenseId(exp.id);
+    setCategory(exp.category);
+    setDate(exp.date);
+    setAmount(exp.amount);
+    setPaymentStatus(exp.paymentStatus);
+    setPaymentMethod(exp.paymentMethod);
+    setReference(exp.reference || '');
+    setNotes(exp.notes || '');
+    setIsCourierFee(Boolean(exp.isCourierFee));
+    setIsModalOpen(true);
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (amount <= 0) {
@@ -53,6 +70,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
       return;
     }
     onSaveExpense({
+      id: editingExpenseId || undefined,
       category,
       date,
       amount,
@@ -138,6 +156,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                 <th className="px-4 py-3">Payment Method</th>
                 <th className="px-4 py-3">Reference & Notes</th>
                 <th className="px-4 py-3 text-center">P&L Status</th>
+                <th className="px-4 py-3 text-center">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -174,6 +193,28 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({
                         Counted in P&L
                       </span>
                     )}
+                  </td>
+                  <td className="px-4 py-3 text-center whitespace-nowrap">
+                    <div className="flex items-center justify-center gap-1.5">
+                      <button
+                        onClick={() => handleEditExpense(exp)}
+                        className="px-2 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-semibold rounded text-[11px] cursor-pointer"
+                      >
+                        Edit
+                      </button>
+                      {onDeleteExpense && (
+                        <button
+                          onClick={() => {
+                            if (window.confirm(`Delete expense ৳${exp.amount} (${exp.category})?`)) {
+                              onDeleteExpense(exp.id);
+                            }
+                          }}
+                          className="px-2 py-1 bg-red-50 hover:bg-red-100 text-red-700 font-semibold rounded text-[11px] cursor-pointer"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

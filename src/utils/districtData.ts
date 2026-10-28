@@ -88,12 +88,12 @@ export const BANGLADESH_DISTRICTS: DistrictInfo[] = [
 ];
 
 export const COURIER_PROVIDERS = [
-  { id: 'Steadfast', name: 'Steadfast Courier', code: 'ST', defaultInsideCharge: 70, defaultOutsideCharge: 130 },
-  { id: 'Pathao', name: 'Pathao Courier', code: 'PTH', defaultInsideCharge: 60, defaultOutsideCharge: 120 },
-  { id: 'RedX', name: 'RedX Delivery', code: 'RDX', defaultInsideCharge: 65, defaultOutsideCharge: 130 },
-  { id: 'eCourier', name: 'eCourier Ltd', code: 'ECR', defaultInsideCharge: 70, defaultOutsideCharge: 135 },
-  { id: 'Paperfly', name: 'Paperfly', code: 'PFLY', defaultInsideCharge: 60, defaultOutsideCharge: 120 },
-  { id: 'Sundarban', name: 'Sundarban Courier', code: 'SC', defaultInsideCharge: 80, defaultOutsideCharge: 150 },
-  { id: 'SA Paribahan', name: 'SA Paribahan', code: 'SAP', defaultInsideCharge: 100, defaultOutsideCharge: 160 },
+  { id: 'Steadfast', name: 'Steadfast Courier', code: 'ST', defaultInsideCharge: 80, defaultOutsideCharge: 120 },
+  { id: 'Pathao', name: 'Pathao Courier', code: 'PTH', defaultInsideCharge: 80, defaultOutsideCharge: 120 },
+  { id: 'RedX', name: 'RedX Delivery', code: 'RDX', defaultInsideCharge: 80, defaultOutsideCharge: 120 },
+  { id: 'eCourier', name: 'eCourier Ltd', code: 'ECR', defaultInsideCharge: 80, defaultOutsideCharge: 120 },
+  { id: 'Paperfly', name: 'Paperfly', code: 'PFLY', defaultInsideCharge: 80, defaultOutsideCharge: 120 },
+  { id: 'Sundarban', name: 'Sundarban Courier', code: 'SC', defaultInsideCharge: 80, defaultOutsideCharge: 120 },
+  { id: 'SA Paribahan', name: 'SA Paribahan', code: 'SAP', defaultInsideCharge: 80, defaultOutsideCharge: 120 },
   { id: 'Manual', name: 'In-House / Showroom Pick', code: 'MAN', defaultInsideCharge: 0, defaultOutsideCharge: 0 },
 ];

@@ -13,6 +13,7 @@ import {
   RotateCcw,
   Eye,
   FileSpreadsheet,
+  Trash2,
 } from 'lucide-react';
 import { Order, OrderStatus } from '../types/database';
 
@@ -20,6 +21,7 @@ interface OrdersViewProps {
   orders: Order[];
   onOpenNewOrder: () => void;
   onSelectOrder: (order: Order) => void;
+  onDeleteOrder?: (orderId: string) => { success: boolean; error?: string };
   onBulkUpdateStatus: (orderIds: string[], newStatus: OrderStatus) => void;
 }
 
@@ -27,6 +29,7 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
   orders,
   onOpenNewOrder,
   onSelectOrder,
+  onDeleteOrder,
   onBulkUpdateStatus,
 }) => {
   const [search, setSearch] = useState('');
@@ -319,13 +322,28 @@ export const OrdersView: React.FC<OrdersViewProps> = ({
                         </span>
                       </td>
                       <td className="px-3 py-3 text-center">
-                        <button
-                          onClick={() => onSelectOrder(ord)}
-                          className="p-1.5 text-slate-600 hover:text-emerald-700 hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
-                          title="View order details and status timeline"
-                        >
-                          <Eye className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center justify-center gap-1">
+                          <button
+                            onClick={() => onSelectOrder(ord)}
+                            className="p-1.5 text-slate-600 hover:text-emerald-700 hover:bg-slate-100 rounded-md transition-colors cursor-pointer"
+                            title="View / Edit order details and status timeline"
+                          >
+                            <Eye className="w-4 h-4" />
+                          </button>
+                          {onDeleteOrder && (
+                            <button
+                              onClick={() => {
+                                if (window.confirm(`Delete order ${ord.orderNumber} (${ord.customerName})?`)) {
+                                  onDeleteOrder(ord.id);
+                                }
+                              }}
+                              className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors cursor-pointer"
+                              title="Delete order"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
